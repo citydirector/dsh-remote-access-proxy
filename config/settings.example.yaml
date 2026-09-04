@@ -1,0 +1,22 @@
+# dsh-remote-access-proxy — settings template (脱敏示例，勿直接使用其中的占位值)
+#
+# 拷入 DSH 的 data\settings.yaml 的 remote-access-proxy: 段（或经 Web UI
+# 设置 → 插件配置 → 远程访问代理 填写）。
+# secretPath / cookieValue 留空时插件启动会自动生成并回写，无需手填。
+
+remote-access-proxy:
+  enabled: true
+  # 监听地址：0.0.0.0 = 全部网卡（VPN/反代/局域网均可到达）；或填本机网卡具体 IP
+  listenHost: 0.0.0.0
+  listenPort: 40443
+  # 随机门禁路径（4–32 位字母数字、连字符或下划线；留空自动生成）
+  secretPath: CHANGE_ME_RANDOM_PATH
+  # 门禁 HttpOnly Cookie 值（至少 8 位；留空自动生成；改后旧 Cookie 立即失效）
+  cookieValue: CHANGE_ME_COOKIE_VALUE
+  # 上游 DSH 本体（默认 127.0.0.1:3080）
+  upstreamHost: 127.0.0.1
+  upstreamPort: 3080
+  # TLS：true 时用自签 pfx（浏览器需接受一次证书警告）；false = 明文 http
+  tlsEnabled: true
+  tlsPfxPath: .\data\certs\local-proxy.pfx
+  tlsPassphrase: CHANGE_ME_PFX_PASSPHRASE

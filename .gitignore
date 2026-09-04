@@ -1,0 +1,21 @@
+# runtime artifacts — never commit
+access.log
+*.log
+node_modules/
+
+# secrets & credentials — never commit
+certs/
+*.pfx
+*.p12
+*.key
+*.pem
+*.crt
+*.jks
+.env
+.env.*
+
+# temp / OS noise
+.DS_Store
+Thumbs.db
+_skadi_temp/
+*.tmp
