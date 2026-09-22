@@ -1,26 +1,33 @@
 /**
- * Standalone end-to-end test for dsh-remote-access-proxy (2026-09-04 rewrite).
+ * Standalone end-to-end test for dsh-remote-access-proxy.
  * Mocks the DSH upstream (launch-token exchange + dsh-auth cookie gate) and a
  * minimal cordis ctx (settings + connection), then exercises the proxy server.
  *
  * Run: node test-remote-access-proxy.mjs
+ *
+ * It loads the plugin beside this file — the copy a pnpm install of this bundle
+ * deploys — so module resolution matches production when run from an installed
+ * bundle, or after a local install. DSH_PLUGIN points at any other copy. The
+ * plugin appends to its access.log; the harness snapshots that file and restores
+ * it on exit, so test activity leaves no trace.
  */
 
 import http from "node:http"
 import { randomBytes } from "node:crypto"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { readFileSync, writeFileSync } from "node:fs"
-import { pathToFileURL } from "node:url"
+import { fileURLToPath, pathToFileURL } from "node:url"
 
-// Test the REAL plugin file from a DSH installation (module resolution must
-// match production, so the harness reads it from $DSH_HOME and lets DSH's own
-// node_modules supply @deepseek-ai/schemastery). The plugin appends to its
-// access.log; the harness snapshots that file and restores it on exit so test
-// activity leaves no trace. Override DSH_HOME to point at any DSH install.
-const DSH_HOME = process.env.DSH_HOME || "D:/dsh-portable"
-const PLUGIN_URL = pathToFileURL(join(DSH_HOME, "data/profiles/web/dsh-remote-access-proxy.mjs")).href
-const REAL_LOG = join(DSH_HOME, "data/profiles/web/access.log")
-const LOG_BEFORE = readFileSync(REAL_LOG, "utf8")
+const PLUGIN_URL = process.env.DSH_PLUGIN
+  ? pathToFileURL(process.env.DSH_PLUGIN).href
+  : new URL("./plugin/dsh-remote-access-proxy.mjs", import.meta.url).href
+const REAL_LOG = join(dirname(fileURLToPath(PLUGIN_URL)), "access.log")
+let LOG_BEFORE = ""
+try {
+  LOG_BEFORE = readFileSync(REAL_LOG, "utf8")
+} catch {
+  /* no log yet — the plugin creates it on first write */
+}
 function restoreLog() {
   try {
     writeFileSync(REAL_LOG, LOG_BEFORE)
@@ -118,9 +125,6 @@ function createMockDsh() {
       set rejectHeld(v) {
         rejectHeld = v
       },
-      get validCookie() {
-        return validCookie
-      },
     }))
   })
 }
@@ -131,9 +135,8 @@ function createCtx(settings, connection) {
   const state = { ...settings }
   return {
     settings: {
-      register(ns, schema, opts) {
-        this._ns = ns
-        this._schema = schema
+      register() {
+        /* the harness drives start() directly; registration is a no-op here */
       },
       get(ns) {
         return { ...state }
@@ -173,7 +176,6 @@ function httpReq(port, { method = "GET", path = "/", headers = {}, body } = {}) 
   })
 }
 
-const results = []
 async function main() {
   const mock = await createMockDsh()
   console.log(`mock DSH upstream on 127.0.0.1:${mock.port}, launch token present`)
