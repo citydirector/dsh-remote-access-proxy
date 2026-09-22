@@ -10,7 +10,7 @@
  *   the /api trust fence accepts any front — no per-host trustedHosts needed.
  * - Optional TLS (self-signed pfx): browsers require a secure context for
  *   crypto.randomUUID, so plain-HTTP remote access breaks the web client.
- * - Configured on the web page: Settings → 插件配置 → 远程访问代理.
+ * - Configured on the Plugins page (sidebar → Plugins → 远程访问代理).
  *   Changes restart the embedded server without a DSH restart.
  *
  * DSH browser-auth bridge (2026-09-04): DSH now authenticates every browser
@@ -34,6 +34,8 @@ export const inject = ["settings", "connection"]
 
 const NS = "remote-access-proxy"
 const HERE = fileURLToPath(new URL(".", import.meta.url))
+/** Name of the HttpOnly cookie this proxy's gate mints. */
+const GATE_COOKIE = "dsh_et_gate"
 
 const Schema = z.object({
   enabled: z.boolean().default(true),
@@ -66,7 +68,7 @@ function genToken(length) {
  *   request (stale DSH cookie); drop it and refresh in the background.
  */
 function buildServer(settings, log, getDshCookie, onUpstream401) {
-  const { secretPath, cookieName = "dsh_et_gate", cookieValue, upstreamHost, upstreamPort } = settings
+  const { secretPath, cookieValue, upstreamHost, upstreamPort } = settings
   const prefix = "/" + secretPath
 
   function hasGate(headers) {
@@ -74,7 +76,7 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
     for (const part of raw.split(";")) {
       const idx = part.indexOf("=")
       if (idx < 0) continue
-      if (part.slice(0, idx).trim() === cookieName && part.slice(idx + 1).trim() === cookieValue) return true
+      if (part.slice(0, idx).trim() === GATE_COOKIE && part.slice(idx + 1).trim() === cookieValue) return true
     }
     return false
   }
@@ -83,6 +85,22 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
     if (pathname === prefix) return "/"
     if (pathname.startsWith(prefix + "/")) return pathname.slice(prefix.length)
     return undefined
+  }
+
+  /**
+   * Present any request to DSH as loopback: the /api trust fence accepts it no
+   * matter which VPN/reverse-proxy front this proxy sits behind (stripping
+   * Origin satisfies the fence's same-origin check). The proxy-held DSH cookie
+   * satisfies the browser-auth gate, and replacing the client's own Cookie
+   * header keeps it from reaching DSH. Security is still our gate in front.
+   */
+  function upstreamHeaders(req, cookie) {
+    const headers = { ...req.headers }
+    headers.host = `${upstreamHost}:${upstreamPort}`
+    delete headers.origin
+    if (cookie === undefined) delete headers.cookie
+    else headers.cookie = cookie
+    return headers
   }
 
   /**
@@ -103,25 +121,26 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
   }
 
   async function forward(req, res, path, search, setGate) {
-    // Present the request to DSH as loopback so the /api trust fence accepts it
-    // no matter which VPN/reverse-proxy front this proxy sits behind; stripping
-    // Origin satisfies the fence's same-origin check. The proxy-held DSH cookie
-    // satisfies the new browser-auth gate. Security is still our gate (random
-    // path + HttpOnly cookie) in front of this proxy.
     const cookie = await getDshCookie()
-    const headers = { ...req.headers }
-    headers.host = `${upstreamHost}:${upstreamPort}`
-    delete headers.origin
-    if (cookie !== undefined) headers.cookie = cookie
-    else delete headers.cookie
     const upstreamReq = http.request(
-      { hostname: upstreamHost, port: upstreamPort, method: req.method, path: upstreamTarget(path, search), headers },
+      {
+        hostname: upstreamHost,
+        port: upstreamPort,
+        method: req.method,
+        path: upstreamTarget(path, search),
+        headers: upstreamHeaders(req, cookie),
+      },
       (upRes) => {
         if (upRes.statusCode === 401) onUpstream401?.()
         const outHeaders = { ...upRes.headers }
-        if (setGate) outHeaders["set-cookie"] = `${cookieName}=${cookieValue}; Path=/; HttpOnly; SameSite=Strict`
-        if (setGate && typeof outHeaders.location === "string" && outHeaders.location.startsWith("/")) {
-          outHeaders.location = prefix + outHeaders.location
+        if (setGate) {
+          outHeaders["set-cookie"] = `${GATE_COOKIE}=${cookieValue}; Path=/; HttpOnly; SameSite=Strict`
+          // Defensive: today the token is always stripped, so DSH never redirects
+          // on the gate path; should it ever answer a root-relative Location,
+          // re-enter through the gate instead of the ungated origin root.
+          if (typeof outHeaders.location === "string" && outHeaders.location.startsWith("/")) {
+            outHeaders.location = prefix + outHeaders.location
+          }
         }
         res.writeHead(upRes.statusCode || 502, outHeaders)
         upRes.pipe(res)
@@ -164,19 +183,18 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
     }
     const target = path !== undefined ? path : url.pathname
     const cookie = await getDshCookie()
-    const headers = { ...req.headers }
-    headers.host = `${upstreamHost}:${upstreamPort}`
-    delete headers.origin
-    if (cookie !== undefined) headers.cookie = cookie
-    else delete headers.cookie
-    const upstreamReq = http.request(
-      { hostname: upstreamHost, port: upstreamPort, method: req.method, path: upstreamTarget(target, url.search), headers },
-    )
+    const upstreamReq = http.request({
+      hostname: upstreamHost,
+      port: upstreamPort,
+      method: req.method,
+      path: upstreamTarget(target, url.search),
+      headers: upstreamHeaders(req, cookie),
+    })
     upstreamReq.on("upgrade", (upRes, upSocket, upHead) => {
       log(`WS-UPGRADE ${req.url}`)
       socket.write("HTTP/1.1 101 Switching Protocols\r\n")
       for (const [key, value] of Object.entries(upRes.headers)) {
-        if (Array.isArray(value)) value.forEach((v) => socket.write(`${key}: ${value}\r\n`))
+        if (Array.isArray(value)) value.forEach((item) => socket.write(`${key}: ${item}\r\n`))
         else socket.write(`${key}: ${value}\r\n`)
       }
       socket.write("\r\n")
