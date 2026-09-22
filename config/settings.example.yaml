@@ -1,7 +1,7 @@
 # dsh-remote-access-proxy — settings template (脱敏示例，勿直接使用其中的占位值)
 #
 # 拷入 DSH 的 data\settings.yaml 的 remote-access-proxy: 段（或经 Web UI
-# 设置 → 插件配置 → 远程访问代理 填写）。
+# 侧边栏 → 插件 → 远程访问代理 卡片填写）。
 # secretPath / cookieValue 留空时插件启动会自动生成并回写，无需手填。
 
 remote-access-proxy:

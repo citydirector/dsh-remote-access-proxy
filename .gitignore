@@ -17,5 +17,4 @@ certs/
 # temp / OS noise
 .DS_Store
 Thumbs.db
-_skadi_temp/
 *.tmp

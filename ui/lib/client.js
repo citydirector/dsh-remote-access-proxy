@@ -222,7 +222,7 @@ window.__ModuleLoader__.load({
 
     /** Text/number input row. */
     function ValueField(props) {
-      const { field, spec, label, hint, state, disabled, onEdit } = props;
+      const { kind, label, hint, state, disabled, onEdit } = props;
       return react.createElement(
         "div",
         { style: S.field },
@@ -240,7 +240,7 @@ window.__ModuleLoader__.load({
             : null,
         ),
         react.createElement("input", {
-          type: spec.kind === "number" ? "number" : "text",
+          type: kind === "number" ? "number" : "text",
           style: S.input,
           value: state.text,
           disabled,
@@ -253,7 +253,7 @@ window.__ModuleLoader__.load({
 
     /** Boolean toggle row. */
     function ToggleField(props) {
-      const { field, label, hint, state, disabled, onEdit } = props;
+      const { label, hint, state, disabled, onEdit } = props;
       return react.createElement(
         "div",
         { style: S.field },
@@ -310,10 +310,8 @@ window.__ModuleLoader__.load({
       const state = props.useRapCard((snapshot) => snapshot);
       const fields = FIELDS.map((entry) => {
         const fieldState = state[entry.spec.field] ?? { text: "", overridden: false, invalid: false };
-        const common = {
+        const shared = {
           key: entry.spec.field,
-          field: entry.spec.field,
-          spec: entry.spec,
           label: entry.label,
           hint: entry.hint,
           state: fieldState,
@@ -322,8 +320,8 @@ window.__ModuleLoader__.load({
           onEdit: (value) => props.edit(entry.spec.field, value),
         };
         return entry.spec.kind === "boolean"
-          ? react.createElement(ToggleField, common)
-          : react.createElement(ValueField, common);
+          ? react.createElement(ToggleField, shared)
+          : react.createElement(ValueField, { ...shared, kind: entry.spec.kind });
       });
       return react.createElement(
         PluginConfigForm,
