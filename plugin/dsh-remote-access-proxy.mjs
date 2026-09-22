@@ -85,11 +85,21 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
     return undefined
   }
 
-  /** Upstream path with the launch token stripped — the proxy owns the DSH cookie. */
+  /**
+   * Upstream path with the launch token stripped — the proxy owns the DSH cookie.
+   *
+   * Operates on the RAW query string: DSH's client-plugin bundler serves bundles
+   * at `/plugins/??<id>,<id>&rev=<hash>`, a scheme whose `?`, `,`, `@` and `/`
+   * must reach the upstream verbatim. A URL/searchParams round-trip percent-
+   * encodes them (`??id` -> `?%3Fid`), the bundle 404s, and every client plugin
+   * (incl. the `@deepseek-ai/dsh-client-modules` bootstrap) fails to preload.
+   * So drop only the `token=` segment, textually, and touch nothing else.
+   */
   function upstreamTarget(path, search) {
-    const url = new URL(path + search, "http://dsh.invalid")
-    url.searchParams.delete("token")
-    return url.pathname + url.search
+    if (!search || search.indexOf("token=") === -1) return path + search
+    const lead = /^\?+/.exec(search)?.[0] ?? "?"
+    const kept = search.slice(lead.length).split("&").filter((part) => !part.startsWith("token="))
+    return kept.length > 0 ? path + lead + kept.join("&") : path
   }
 
   async function forward(req, res, path, search, setGate) {
