@@ -8,20 +8,23 @@
  * It loads the plugin beside this file — the copy a pnpm install of this bundle
  * deploys — so module resolution matches production when run from an installed
  * bundle, or after a local install. DSH_PLUGIN points at any other copy. The
- * plugin appends to its access.log; the harness snapshots that file and restores
- * it on exit, so test activity leaves no trace.
+ * plugin appends to its access.log; the harness snapshots that file (and clears
+ * the rotated access.log.1…) and restores it on exit, so test activity leaves no
+ * trace.
  */
 
 import http from "node:http"
 import { randomBytes } from "node:crypto"
 import { dirname, join } from "node:path"
-import { readFileSync, writeFileSync } from "node:fs"
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 const PLUGIN_URL = process.env.DSH_PLUGIN
   ? pathToFileURL(process.env.DSH_PLUGIN).href
   : new URL("./plugin/dsh-remote-access-proxy.mjs", import.meta.url).href
 const REAL_LOG = join(dirname(fileURLToPath(PLUGIN_URL)), "access.log")
+/** Rotated files the plugin can create; the harness restores the whole ring. */
+const LOG_RING = 5
 let LOG_BEFORE = ""
 try {
   LOG_BEFORE = readFileSync(REAL_LOG, "utf8")
@@ -33,6 +36,20 @@ function restoreLog() {
     writeFileSync(REAL_LOG, LOG_BEFORE)
   } catch {
     /* best effort */
+  }
+  for (let i = 1; i <= LOG_RING; i += 1) {
+    try {
+      rmSync(`${REAL_LOG}.${i}`, { force: true })
+    } catch {
+      /* not there */
+    }
+  }
+}
+function logSize(suffix = "") {
+  try {
+    return statSync(REAL_LOG + suffix).size
+  } catch {
+    return -1
   }
 }
 const LAUNCH_TOKEN = "TEST_LAUNCH_TOKEN_0123456789abcdef0123456789abcdef"
@@ -289,6 +306,23 @@ async function main() {
   await sleep(150)
   const afterDisable = await httpReq(proxyPort, { path: "/t3stpath/" }).catch((e) => ({ status: "conn-error" }))
   check("disabled setting stops listener", afterDisable.status === "conn-error", `got ${afterDisable.status}`)
+
+  // 9) access.log rotation: a tiny cap must rotate into access.log.1 and keep the
+  //    live file under the cap. Each gate miss logs one DENY line.
+  ctx2._fireSettings({ ...settings, enabled: true, logMaxBytes: 300, logKeep: 2 })
+  await sleep(150)
+  for (let i = 0; i < 12; i += 1) await httpReq(proxyPort, { path: "/logfill" })
+  const liveSize = logSize()
+  check("rotation keeps the live log under the cap", liveSize > 0 && liveSize <= 300, `size=${liveSize}`)
+  check("rotation archived the previous log", logSize(".1") > 0, `size=${logSize(".1")}`)
+  check("rotation honours logKeep (no .3 with keep=2)", !existsSync(`${REAL_LOG}.3`))
+
+  // 10) logMaxBytes=0 is the off switch: the log grows again, nothing rotates.
+  rmSync(`${REAL_LOG}.1`, { force: true })
+  ctx2._fireSettings({ ...settings, enabled: true, logMaxBytes: 0, logKeep: 2 })
+  await sleep(150)
+  for (let i = 0; i < 12; i += 1) await httpReq(proxyPort, { path: "/logfill" })
+  check("logMaxBytes=0 disables rotation", logSize() > 300 && !existsSync(`${REAL_LOG}.1`), `size=${logSize()}`)
 
   ctx2._disposeAll()
   mock.server.close()

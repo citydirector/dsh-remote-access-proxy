@@ -60,6 +60,8 @@ window.__ModuleLoader__.load({
       { spec: textField("tlsPassphrase"), label: "TLS 证书口令", hint: "导出 pfx 时设置的口令" },
       { spec: textField("upstreamHost"), label: "上游主机", hint: "转发目标（默认 127.0.0.1，即 DSH 本体）" },
       { spec: numberField("upstreamPort"), label: "上游端口", hint: "转发目标端口（默认 3080）" },
+      { spec: numberField("logMaxBytes"), label: "日志上限 (字节)", hint: "access.log 超过此大小即轮转；0 = 不轮转（默认 1048576 = 1 MiB）" },
+      { spec: numberField("logKeep"), label: "日志保留份数", hint: "轮转后保留 access.log.1…N 的份数；0 = 不留历史，直接清空（默认 3）" },
     ];
 
     // ---- staged form over one bound settings scope -------------------------

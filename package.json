@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-access-proxy",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "DSH web GUI remote-access proxy as a profile bundle: a random-path + HttpOnly-cookie reverse proxy with a DSH launch-token bridge, plus its configuration card.",
   "license": "MIT",

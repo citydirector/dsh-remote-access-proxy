@@ -12,6 +12,9 @@
  *   crypto.randomUUID, so plain-HTTP remote access breaks the web client.
  * - Configured on the Plugins page (sidebar → Plugins → 远程访问代理).
  *   Changes restart the embedded server without a DSH restart.
+ * - Diagnostics go to a size-bounded `access.log` beside this file: it rotates
+ *   at `logMaxBytes` and keeps `logKeep` older files (`access.log.1`…), so a
+ *   long-running deployment cannot grow an unbounded log.
  *
  * DSH browser-auth bridge (2026-09-04): DSH now authenticates every browser
  * session with a per-process launch token (`http://127.0.0.1:3080/?token=…`)
@@ -25,7 +28,7 @@
 
 import http from "node:http"
 import https from "node:https"
-import { appendFileSync, readFileSync } from "node:fs"
+import { appendFileSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import z from "@deepseek-ai/schemastery"
 
@@ -36,6 +39,9 @@ const NS = "remote-access-proxy"
 const HERE = fileURLToPath(new URL(".", import.meta.url))
 /** Name of the HttpOnly cookie this proxy's gate mints. */
 const GATE_COOKIE = "dsh_et_gate"
+/** Rotation defaults, used when a settings object predates the log fields. */
+const DEFAULT_LOG_MAX_BYTES = 1024 * 1024
+const DEFAULT_LOG_KEEP = 3
 
 const Schema = z.object({
   enabled: z.boolean().default(true),
@@ -48,6 +54,11 @@ const Schema = z.object({
   tlsEnabled: z.boolean().default(false),
   tlsPfxPath: z.string().default(""),
   tlsPassphrase: z.string().default(""),
+  // access.log rotation: rotate before a write that would pass this size
+  // (0 = never rotate, the pre-rotation behaviour); how many rotated files to
+  // keep (0 = keep no history, just truncate).
+  logMaxBytes: z.number().default(DEFAULT_LOG_MAX_BYTES),
+  logKeep: z.number().default(DEFAULT_LOG_KEEP),
 })
 
 function genToken(length) {
@@ -55,6 +66,69 @@ function genToken(length) {
   let out = ""
   for (let i = 0; i < length; i += 1) out += chars[Math.floor(Math.random() * chars.length)]
   return out
+}
+
+/** Byte size of a file, or 0 when it does not exist. */
+function sizeOf(path) {
+  try {
+    return statSync(path).size
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Shift the log ring one step: `<base>` → `<base>.1` → … → `<base>.<keep>`, the
+ * oldest file dropped. Destinations are always freed before a rename, because
+ * Windows `rename` refuses to overwrite an existing file.
+ *
+ * @param base - absolute path of the live log file.
+ * @param keep - rotated files to keep; `<= 0` truncates instead of archiving.
+ */
+function rotateLog(base, keep) {
+  if (keep <= 0) {
+    try {
+      writeFileSync(base, "")
+    } catch {
+      /* best effort */
+    }
+    return
+  }
+  try {
+    rmSync(`${base}.${keep}`, { force: true })
+  } catch {
+    /* best effort */
+  }
+  for (let i = keep - 1; i >= 1; i -= 1) {
+    try {
+      renameSync(`${base}.${i}`, `${base}.${i + 1}`)
+    } catch {
+      /* that ring slot is empty */
+    }
+  }
+  try {
+    renameSync(base, `${base}.1`)
+  } catch {
+    /* nothing to rotate yet */
+  }
+}
+
+/**
+ * Append one timestamped line to `access.log`, rotating by size first.
+ *
+ * @param dir - directory holding the log (the plugin's own directory).
+ * @param line - the message, without the timestamp or newline.
+ * @param maxBytes - rotate before a write that would pass this size; `0` disables.
+ * @param keep - rotated files to keep.
+ */
+function writeLogLine(dir, line, maxBytes, keep) {
+  const base = dir + "access.log"
+  const entry = `[${new Date().toISOString()}] ${line}\n`
+  const cap = typeof maxBytes === "number" ? maxBytes : DEFAULT_LOG_MAX_BYTES
+  if (cap > 0 && sizeOf(base) + Buffer.byteLength(entry) > cap) {
+    rotateLog(base, typeof keep === "number" ? keep : DEFAULT_LOG_KEEP)
+  }
+  appendFileSync(base, entry)
 }
 
 /**
@@ -241,8 +315,9 @@ export function apply(ctx) {
   let exchanging = undefined
 
   function log(line) {
+    const limits = current ?? ctx.settings.get(NS)
     try {
-      appendFileSync(HERE + "access.log", `[${new Date().toISOString()}] ${line}\n`)
+      writeLogLine(HERE, line, limits?.logMaxBytes, limits?.logKeep)
     } catch {
       /* best effort */
     }

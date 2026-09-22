@@ -56,9 +56,11 @@ dsh-remote-access-proxy/
 │   ├── package.json                # dsh.client declaration + exports["./client"]
 │   └── lib/{index.js,client.js}    # host half (row anchor) + browser half (card)
 ├── config/settings.example.yaml    # sanitized configuration template
-├── test-remote-access-proxy.mjs    # mock-DSH end-to-end tests (12 checks)
+├── test-remote-access-proxy.mjs    # mock-DSH end-to-end tests (16 checks)
 └── README.md / README.zh-CN.md
 ```
+
+`access.log` (and its rotated `.1`… siblings) is runtime output and never committed.
 
 ## Why it is needed
 
@@ -101,8 +103,28 @@ and written back on first start when left empty.
 | `cookieValue` | Gate HttpOnly cookie value |
 | `upstreamHost` / `upstreamPort` | Upstream DSH (default `127.0.0.1:3080`) |
 | `tlsEnabled` / `tlsPfxPath` / `tlsPassphrase` | Self-signed TLS (pfx) |
+| `logMaxBytes` / `logKeep` | `access.log` rotation: rotate once a write would pass this size (default `1048576` = 1 MiB) and keep this many older files (default `3`). `logMaxBytes: 0` = never rotate; `logKeep: 0` = keep no history |
 
 Entry: `https://<IP>:<port>/<secretPath>/` (accept the self-signed certificate once per device).
+
+## Log rotation
+
+Every gated request (`ENTRY` / `PASS` / `DENY`), listener change and DSH 401 self-heal
+is appended to `access.log` beside the plugin in the profile's `node_modules`. Left
+alone that file grows without bound, so it rotates by size instead:
+
+- a line that would push the file past `logMaxBytes` (default 1 MiB) rotates first;
+- the full file becomes `access.log.1`, older files shift to `access.log.2`, … and
+  whatever passes `logKeep` (default `3`) is deleted;
+- the live `access.log` therefore always stays under the cap, and the whole ring is
+  bounded at `logMaxBytes × (logKeep + 1)`.
+
+Set `logMaxBytes: 0` to restore the never-rotate behaviour, or `logKeep: 0` to keep no
+history at all (each rotation just truncates the live file). Both are ordinary settings
+fields, editable in the card or in `data/settings.yaml`.
+
+Note that these lines are diagnostics, not an audit trail: the startup line records the
+gate path (`secret=…`), so treat the log files with the same care as `settings.yaml`.
 
 ## The configuration card
 
@@ -115,13 +137,13 @@ composed the plugin shows no trace of it.
 ## Tests
 
 ```bash
-# Defaults to D:\dsh-portable; point DSH_HOME at any DSH install otherwise.
-# The harness reads the plugin from $DSH_HOME/data/profiles/web, so it covers the
-# manual-install layout.
-DSH_HOME=/path/to/dsh node test-remote-access-proxy.mjs
-# Expected: 12 passed, 0 failed
+pnpm install                      # once: the plugin imports @deepseek-ai/schemastery
+node test-remote-access-proxy.mjs # loads the plugin beside it (an installed bundle copy
+                                  # works too: DSH_PLUGIN=/path/to/plugin.mjs)
+# Expected: 16 passed, 0 failed
 ```
 
 It mocks a DSH upstream (launch-token exchange + `dsh-auth` cookie gate), checks the
-gate, cookie injection, token stripping, 303 Location rewrite, 401 self-heal and WS
-upgrade, and snapshots/restores the plugin's `access.log` so runs leave no trace.
+gate, cookie injection, token stripping, 303 Location rewrite, 401 self-heal, WS
+upgrade and `access.log` rotation (cap, ring, off switch), and snapshots/restores the
+whole log ring so runs leave no trace.

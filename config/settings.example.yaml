@@ -20,3 +20,7 @@ remote-access-proxy:
   tlsEnabled: true
   tlsPfxPath: .\data\certs\local-proxy.pfx
   tlsPassphrase: CHANGE_ME_PFX_PASSPHRASE
+  # access.log 轮转：写入将超过 logMaxBytes 就先轮转，保留 logKeep 份旧文件
+  # （access.log.1…N）；0 = 不轮转 / 不留历史。默认 1048576 字节、3 份。
+  logMaxBytes: 1048576
+  logKeep: 3

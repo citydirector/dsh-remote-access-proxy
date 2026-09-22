@@ -53,9 +53,11 @@ dsh-remote-access-proxy/
 │   ├── package.json                # dsh.client 声明 + exports["./client"]
 │   └── lib/{index.js,client.js}    # 宿主半（行锚点）+ 浏览器半（卡片）
 ├── config/settings.example.yaml    # 脱敏配置模板
-├── test-remote-access-proxy.mjs    # mock DSH 端到端测试（12 项）
+├── test-remote-access-proxy.mjs    # mock DSH 端到端测试（16 项）
 └── README.md / README.zh-CN.md
 ```
+
+`access.log`（以及轮转出来的 `.1`…）是运行产物，永不入库。
 
 ## 为什么需要它
 
@@ -94,8 +96,24 @@ HttpOnly Cookie 门禁，**永远看不到每次启动的 launchToken**。
 | `cookieValue` | 门禁 HttpOnly Cookie 值 |
 | `upstreamHost` / `upstreamPort` | 上游 DSH（默认 `127.0.0.1:3080`） |
 | `tlsEnabled` / `tlsPfxPath` / `tlsPassphrase` | 自签 TLS（pfx） |
+| `logMaxBytes` / `logKeep` | `access.log` 轮转：写入将超过此大小就先轮转（默认 `1048576` = 1 MiB），保留这么多份旧文件（默认 `3`）。`logMaxBytes: 0` = 不轮转；`logKeep: 0` = 不留历史 |
 
 入口：`https://<IP>:<端口>/<secretPath>/`（每设备接受一次自签证书警告）。
+
+## 日志轮转
+
+每次经过门禁的请求（`ENTRY` / `PASS` / `DENY`）、监听变化与 DSH 401 自愈都会追加到插件
+旁边的 `access.log`（在 profile 的 `node_modules` 里）。放着不管它会无限增长，所以改成按大小轮转：
+
+- 某行写入会把文件顶过 `logMaxBytes`（默认 1 MiB）时，先轮转再写；
+- 写满的文件变成 `access.log.1`，更旧的顺移到 `access.log.2`……超过 `logKeep`（默认 `3`）的直接删除；
+- 因此活动的 `access.log` 始终在阈值以内，整个环上限是 `logMaxBytes × (logKeep + 1)`。
+
+`logMaxBytes: 0` 恢复"从不轮转"，`logKeep: 0` 则不留历史（每次轮转只是清空当前文件）。
+两者都是普通设置字段，卡片或 `data/settings.yaml` 里都能改。
+
+注意这些是**诊断日志而非审计流水**：启动行会记录门禁路径（`secret=…`），
+所以这两个日志文件应当和 `settings.yaml` 同等看待。
 
 ## 配置卡片
 
@@ -106,12 +124,12 @@ HttpOnly Cookie 门禁，**永远看不到每次启动的 launchToken**。
 ## 测试
 
 ```bash
-# 默认读 D:\dsh-portable；其他安装用 DSH_HOME 指向。
-# 测试台从 $DSH_HOME/data/profiles/web 读取插件，覆盖手动安装布局。
-DSH_HOME=/path/to/dsh node test-remote-access-proxy.mjs
-# 期望：12 passed, 0 failed
+pnpm install                      # 只需一次：插件要 import @deepseek-ai/schemastery
+node test-remote-access-proxy.mjs # 默认加载它旁边的插件（已安装的 bundle 副本也行：
+                                  # DSH_PLUGIN=/path/to/plugin.mjs）
+# 期望：16 passed, 0 failed
 ```
 
 它 mock 一个 DSH 上游（复刻 launchToken 交换 + `dsh-auth` Cookie 门禁），校验门禁放行/
-拒绝、Cookie 注入、token 剥离、303 Location 重写、401 自愈、WS 升级，并快照/还原插件的
-`access.log`，测试不留痕。
+拒绝、Cookie 注入、token 剥离、303 Location 重写、401 自愈、WS 升级，以及
+`access.log` 轮转（阈值、环、关断开关），并快照/还原整个日志环，测试不留痕。
