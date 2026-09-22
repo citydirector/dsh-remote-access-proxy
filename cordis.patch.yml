@@ -1,0 +1,14 @@
+# The dsh-remote-access-proxy profile bundle patch: one insert over the profile
+# root. Rows are addressed by id, so a later bundle layer or the user's own
+# profile cordis.patch.yml can override either one (the last write wins per row).
+#
+# `./` module names resolve inside this bundle package, so the same patch works
+# for a pnpm install from a git URL and for a copy dropped into the profile by
+# hand. The configuration card is the `ui/` package's host half; its browser half
+# is the package's exports["./client"], picked up by the client-module scan.
+
+- insert:
+    - id: dsh-remote-access-proxy
+      name: ./plugin/dsh-remote-access-proxy.mjs
+    - id: dsh-remote-access-proxy-ui
+      name: ./ui/lib/index.js
