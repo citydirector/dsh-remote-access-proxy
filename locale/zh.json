@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "远程访问代理",
+    "description": "以随机路径 + HttpOnly Cookie 反向代理暴露 DSH Web GUI，并自动桥接 DSH 的每进程启动 token。"
+  }
+}

@@ -8,6 +8,10 @@ profile bundle**: it embeds a reverse proxy that safely exposes the Web GUI and 
 Tunnel, or a plain LAN IP), bridges the per-process launch-token auth of newer DSH
 builds, and contributes its own configuration page to the Plugins panel.
 
+Built for **DSH 0.1.7-rc.1 or newer** (the profile-owned configuration model). The
+bundle declares that requirement in `peerDependencies`, so installing it on an older
+harness is refused with an explanation instead of failing at load.
+
 ## Install
 
 This repository **is** a bundle package, so the Plugins page can install it straight
@@ -22,8 +26,8 @@ https://github.com/citydirector/dsh-remote-access-proxy
 ```
 
 The manager runs pnpm against the URL, resolves `dsh.bundle.patch`, and adds the
-bundle's rows to the profile's user layer. Enable the bundle, then open the
-**远程访问代理** card in the same panel to configure it.
+bundle's rows to the profile's user layer. Enable the bundle, then open the bundle's
+page, open the **`remote-access-proxy`** row and use its 配置 page.
 
 ### From a profile's CLI
 
@@ -31,32 +35,44 @@ bundle's rows to the profile's user layer. Enable the bundle, then open the
 dsh plugin --profile web add github:citydirector/dsh-remote-access-proxy
 ```
 
+A git dependency is pinned to a commit by the profile's `pnpm-lock.yaml`, so a plain
+`pnpm install` never moves it. To take a newer release, re-run `pnpm add` with the
+same spec from the profile directory and toggle the bundle off and on — that is also
+what makes `node_modules`, `.modules.yaml` and `pnpm-lock.yaml` agree again.
+
 ### By hand
 
-Copy `plugin/` and `ui/` into the profile and insert the two rows yourself:
+Copy `plugin/`, `ui/`, `locale/` and `icon.svg` into the profile and insert the two
+rows yourself:
 
 ```yaml
 # data/profiles/web/cordis.patch.yml
 - insert:
-    - id: dsh-remote-access-proxy
+    - id: remote-access-proxy
       name: ./plugin/dsh-remote-access-proxy.mjs
-    - id: dsh-remote-access-proxy-ui
+    - id: remote-access-proxy-ui
       name: ./ui/lib/index.js
 ```
+
+The host row's id is load-bearing: on 0.1.7+ a plugin's settings namespace **is** its
+profile entry id. A hand-copied install also has no bundle entry in the Plugins page,
+so it gets no 配置 page — edit the profile patch by hand instead.
 
 ## Layout
 
 ```
 dsh-remote-access-proxy/
-├── package.json                    # bundle manifest: dsh.bundle.patch
-├── cordis.patch.yml                # the two rows this bundle inserts
+├── package.json                      # bundle manifest: dsh.bundle.patch, icon, engines/peers
+├── cordis.patch.yml                  # the two rows this bundle inserts
 ├── plugin/
-│   └── dsh-remote-access-proxy.mjs # host-plane gateway (gate + forward server)
-├── ui/                             # configuration card (dual-face package)
-│   ├── package.json                # dsh.client declaration + exports["./client"]
-│   └── lib/{index.js,client.js}    # host half (row anchor) + browser half (card)
-├── config/settings.example.yaml    # sanitized configuration template
-├── test-remote-access-proxy.mjs    # mock-DSH end-to-end tests (16 checks)
+│   └── dsh-remote-access-proxy.mjs   # host-plane gateway (gate + forward server)
+├── ui/                               # configuration page (dual-face package)
+│   ├── package.json                  # dsh.client declaration + exports["./client"]
+│   └── lib/{index.js,client.js}      # host half (row anchor) + browser half (page)
+├── config/cordis.patch.example.yml   # sanitized profile-patch template
+├── locale/{en,zh}.json               # Plugins-page title/description dictionaries
+├── icon.svg                          # Plugins-page artwork
+├── test-remote-access-proxy.mjs      # mock-DSH end-to-end tests (31 checks)
 └── README.md / README.zh-CN.md
 ```
 
@@ -90,9 +106,15 @@ HTTP breaks the Web client. Certificate load failure refuses to start (fail-loud
 
 ## Configuration
 
-Merge `config/settings.example.yaml` into `data/settings.yaml`, or edit the fields in
-the **远程访问代理** card (Plugins panel). `secretPath` / `cookieValue` are generated
-and written back on first start when left empty.
+Every field is a `.volatile()` field of the plugin's own Cordis `Config`, so its values
+live in the active profile's `cordis.patch.yml` — edit them in the 配置 page of the
+`remote-access-proxy` row (Plugins panel), or merge
+[`config/cordis.patch.example.yml`](config/cordis.patch.example.yml) into the profile
+patch by hand. `secretPath` / `cookieValue` are generated and written back on first
+start when left empty.
+
+A save writes the profile patch and is applied immediately: the plugin is **not**
+remounted, the embedded server just restarts with the new values.
 
 | Field | Description |
 |---|---|
@@ -120,19 +142,39 @@ alone that file grows without bound, so it rotates by size instead:
   bounded at `logMaxBytes × (logKeep + 1)`.
 
 Set `logMaxBytes: 0` to restore the never-rotate behaviour, or `logKeep: 0` to keep no
-history at all (each rotation just truncates the live file). Both are ordinary settings
-fields, editable in the card or in `data/settings.yaml`.
+history at all (each rotation just truncates the live file). Both are ordinary config
+fields, editable in the 配置 page or in the profile patch.
 
 Note that these lines are diagnostics, not an audit trail: the startup line records the
-gate path (`secret=…`), so treat the log files with the same care as `settings.yaml`.
+gate path (`secret=…`), so treat the log files with the same care as your profile
+configuration.
 
-## The configuration card
+## The configuration page
 
-The card is a dual-face client package. On the browser side it registers into the
-Plugins page's **`plugins.item`** slot and reads/writes through the `settingsScope`
-client service — the pattern the shipped cards use. It registers only while the Host
-serves the `remote-access-proxy` settings namespace, so a deployment that never
+The page is a dual-face client package. On the browser side it registers into the
+Plugins page's **`plugins.row.config`** slot, keyed
+`dsh-remote-access-proxy#remote-access-proxy`, and reads/writes through the `configForms`
+client service — the staged form the shipped settings pages use. It registers only
+while the Host serves the `remote-access-proxy` namespace, so a deployment that never
 composed the plugin shows no trace of it.
+
+## Migrating from 0.3.0
+
+DSH 0.1.7 removed `settings.yaml`, so 0.3.0 does not load on it. Upgrading is a
+version bump plus one one-shot import:
+
+1. **Update DSH first**, then re-pin the bundle (`pnpm add
+   github:citydirector/dsh-remote-access-proxy` in the profile directory) and toggle it.
+2. **Your values come along.** On the first start after the upgrade DSH imports the
+   `remote-access-proxy:` section of `data/settings.yaml` into the profile patch and
+   renames the file to `settings.yaml.imported`. That import matches on the profile
+   entry id, which is exactly why the row is named `remote-access-proxy`; the same
+   section under the old row id `dsh-remote-access-proxy` would be rejected.
+3. **Check the log once.** A section the composition rejects is only warned about and
+   stays in the renamed file; grep the DSH log for
+   `settings: section … was not imported into entry`.
+4. **The card moved.** It is no longer a top-level card in the Plugins panel; it is the
+   配置 page of the bundle's `remote-access-proxy` row.
 
 ## Tests
 
@@ -140,10 +182,14 @@ composed the plugin shows no trace of it.
 pnpm install                      # once: the plugin imports @deepseek-ai/schemastery
 node test-remote-access-proxy.mjs # loads the plugin beside it (an installed bundle copy
                                   # works too: DSH_PLUGIN=/path/to/plugin.mjs)
-# Expected: 16 passed, 0 failed
+# Expected: 31 passed, 0 failed
 ```
 
-It mocks a DSH upstream (launch-token exchange + `dsh-auth` cookie gate), checks the
-gate, cookie injection, token stripping, 303 Location rewrite, 401 self-heal, WS
-upgrade and `access.log` rotation (cap, ring, off switch), and snapshots/restores the
-whole log ring so runs leave no trace.
+It mocks a DSH upstream (launch-token exchange + `dsh-auth` cookie gate) and the 0.1.7
+host contract around the plugin — volatile Config references, `loader/volatile-update`,
+the profile configuration editor and the page-policy call — then checks the gate, cookie
+injection, token stripping, 303 Location rewrite, 401 self-heal, WS upgrade,
+`access.log` rotation (cap, ring, off switch), generated-secret write-back, the
+volatile-field contract, and the bundle/package layout (patch rows resolve, metadata is
+packaged, the browser half registers the row page and edits every field). It snapshots
+and restores the whole log ring so runs leave no trace.

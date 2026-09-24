@@ -10,8 +10,10 @@
  *   the /api trust fence accepts any front — no per-host trustedHosts needed.
  * - Optional TLS (self-signed pfx): browsers require a secure context for
  *   crypto.randomUUID, so plain-HTTP remote access breaks the web client.
- * - Configured on the Plugins page (sidebar → Plugins → 远程访问代理).
- *   Changes restart the embedded server without a DSH restart.
+ * - Configured from the Plugins page: the bundle's row page (sidebar → Plugins
+ *   → dsh-remote-access-proxy → the `remote-access-proxy` row → configure).
+ *   A volatile-only edit never remounts this plugin; it restarts the embedded
+ *   server in place.
  * - Diagnostics go to a size-bounded `access.log` beside this file: it rotates
  *   at `logMaxBytes` and keeps `logKeep` older files (`access.log.1`…), so a
  *   long-running deployment cannot grow an unbounded log.
@@ -24,6 +26,15 @@
  * UX (random path + HttpOnly cookie) and never need to know the launch token.
  * The cookie is signed with a durable secret and lives 30 days, surviving DSH
  * restarts; an upstream 401 drops it and triggers a fresh exchange.
+ *
+ * DSH 0.1.7 configuration model (2026-09-24): `settings.yaml` is gone. A plugin
+ * declares its configurable values in its own Cordis `Config`, marks the ones
+ * that may change without a remount `.volatile()`, and reads them through those
+ * references; Loader commits volatile-only changes in place and notifies this
+ * instance through `loader/volatile-update`. Edits persist into the active
+ * profile's own `cordis.patch.yml` through the configuration editor, so the
+ * profile entry id — not a separately registered namespace — IS the settings
+ * namespace. Every field below is volatile.
  */
 
 import http from "node:http"
@@ -33,8 +44,16 @@ import { fileURLToPath } from "node:url"
 import z from "@deepseek-ai/schemastery"
 
 export const name = "dsh-remote-access-proxy"
-export const inject = ["settings", "connection"]
 
+/**
+ * Required services. `connection` carries this process's launch token. The
+ * settings service is deliberately NOT required: the plugin's configuration is
+ * its own Config, so the proxy still runs — and still serves remote clients —
+ * in a deployment that mounts no settings forms at all.
+ */
+export const inject = ["connection"]
+
+/** Profile entry id of the host row. On DSH 0.1.7+ this IS the settings namespace. */
 const NS = "remote-access-proxy"
 const HERE = fileURLToPath(new URL(".", import.meta.url))
 /** Name of the HttpOnly cookie this proxy's gate mints. */
@@ -43,22 +62,45 @@ const GATE_COOKIE = "dsh_et_gate"
 const DEFAULT_LOG_MAX_BYTES = 1024 * 1024
 const DEFAULT_LOG_KEEP = 3
 
-const Schema = z.object({
-  enabled: z.boolean().default(true),
-  listenHost: z.string().default("0.0.0.0"),
-  listenPort: z.number().default(13337),
-  secretPath: z.string().default(""),
-  cookieValue: z.string().default(""),
-  upstreamHost: z.string().default("127.0.0.1"),
-  upstreamPort: z.number().default(3080),
-  tlsEnabled: z.boolean().default(false),
-  tlsPfxPath: z.string().default(""),
-  tlsPassphrase: z.string().default(""),
+/** Every configurable field, in card order. */
+const FIELDS = [
+  "enabled",
+  "listenHost",
+  "listenPort",
+  "secretPath",
+  "cookieValue",
+  "upstreamHost",
+  "upstreamPort",
+  "tlsEnabled",
+  "tlsPfxPath",
+  "tlsPassphrase",
+  "logMaxBytes",
+  "logKeep",
+]
+
+/**
+ * The plugin's live configuration. Every field is `.volatile()`: a change is
+ * parsed and validated by Loader, committed into these stable references, and
+ * announced with `loader/volatile-update` — the running instance is retained,
+ * so the embedded server is restarted rather than re-imported. No ordinary
+ * field exists, so an edit never takes the remount lifecycle.
+ */
+export const Config = z.object({
+  enabled: z.boolean().default(true).volatile(),
+  listenHost: z.string().default("0.0.0.0").volatile(),
+  listenPort: z.number().default(13337).volatile(),
+  secretPath: z.string().default("").volatile(),
+  cookieValue: z.string().default("").volatile(),
+  upstreamHost: z.string().default("127.0.0.1").volatile(),
+  upstreamPort: z.number().default(3080).volatile(),
+  tlsEnabled: z.boolean().default(false).volatile(),
+  tlsPfxPath: z.string().default("").volatile(),
+  tlsPassphrase: z.string().default("").volatile(),
   // access.log rotation: rotate before a write that would pass this size
   // (0 = never rotate, the pre-rotation behaviour); how many rotated files to
   // keep (0 = keep no history, just truncate).
-  logMaxBytes: z.number().default(DEFAULT_LOG_MAX_BYTES),
-  logKeep: z.number().default(DEFAULT_LOG_KEEP),
+  logMaxBytes: z.number().default(DEFAULT_LOG_MAX_BYTES).volatile(),
+  logKeep: z.number().default(DEFAULT_LOG_KEEP).volatile(),
 })
 
 function genToken(length) {
@@ -307,20 +349,67 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
   return server
 }
 
-export function apply(ctx) {
-  ctx.settings.register(NS, Schema, { base: {} })
+/**
+ * Mount the proxy and keep it in step with the plugin's live configuration.
+ *
+ * @param ctx - the plugin context (`connection` is injected).
+ * @param config - the schema-parsed Config: one `Volatile` reference per field.
+ */
+export function apply(ctx, config) {
   let server = undefined
   let current = undefined
   let dshCookie = undefined
   let exchanging = undefined
 
+  // This plugin ships its own page for its row; tell the settings service not to
+  // offer a generated one. Optional: a deployment without settings still runs.
+  ctx.inject(["settings"], (child) => {
+    child.effect(() => child.settings.configure({ auto: false }, ctx.fiber), "dsh-remote-access-proxy: page policy")
+  })
+
   function log(line) {
-    const limits = current ?? ctx.settings.get(NS)
     try {
-      writeLogLine(HERE, line, limits?.logMaxBytes, limits?.logKeep)
+      writeLogLine(HERE, line, current?.logMaxBytes, current?.logKeep)
     } catch {
       /* best effort */
     }
+  }
+
+  /** Read one `.get()` per configured field; an absent field keeps its schema default. */
+  function readConfig() {
+    const parsed = config ?? Config({})
+    const values = {}
+    for (const field of FIELDS) {
+      const ref = parsed[field]
+      values[field] = ref !== undefined && typeof ref.get === "function" ? ref.get() : ref
+    }
+    return values
+  }
+
+  /**
+   * Write generated values back into the active profile's plugin configuration.
+   *
+   * The values live in the profile's own `cordis.patch.yml`, so the write goes
+   * through the configuration editor — and only once the Loader has settled, or
+   * the edit would re-enter the reconcile that is still mounting this plugin.
+   * Without an editor (a profile-less run) the generated values stay
+   * process-local and change on the next start.
+   */
+  function persistConfig(patch) {
+    const entry = ctx.fiber?.entry
+    const editor = ctx.get?.("configEditor")
+    if (entry === undefined || editor === undefined) {
+      log("no profile configuration editor; generated values are process-local")
+      return
+    }
+    const write = () => {
+      editor.edit(entry, (existing = {}) => ({ ...existing, ...patch })).catch((error) => {
+        log(`configuration write failed (${error?.message ?? error}); generated values are process-local`)
+      })
+    }
+    const loader = ctx.root?.loader
+    if (loader !== undefined && typeof loader.await === "function") loader.await().then(write, write)
+    else queueMicrotask(write)
   }
 
   function ensureSecrets(settings) {
@@ -328,7 +417,7 @@ export function apply(ctx) {
     if (!settings.secretPath) patch.secretPath = genToken(12)
     if (!settings.cookieValue) patch.cookieValue = genToken(24)
     if (Object.keys(patch).length > 0) {
-      ctx.settings.update(NS, patch).catch(() => {})
+      persistConfig(patch)
       return { ...settings, ...patch }
     }
     return settings
@@ -430,11 +519,12 @@ export function apply(ctx) {
     }
   }
 
-  start(ctx.settings.get(NS))
+  start(readConfig())
 
-  ctx.on("settings/updated", (ns, next) => {
-    if (ns === NS) start(next)
+  // A volatile-only configuration edit keeps this instance and lands here.
+  ctx.on("loader/volatile-update", () => {
+    start(readConfig())
   })
 
-  ctx.effect(() => () => stop())
+  ctx.effect(() => () => stop(), "dsh-remote-access-proxy: proxy server")
 }

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Remote Access Proxy",
+    "description": "Expose the DSH Web GUI through a random-path + HttpOnly-cookie reverse proxy, bridged to DSH's per-process launch token."
+  }
+}

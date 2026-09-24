@@ -1,0 +1,39 @@
+# dsh-remote-access-proxy — profile-layer configuration example (DSH 0.1.7+)
+#
+# DSH 0.1.7 removed `settings.yaml`. A plugin's configuration now lives in the
+# active profile's own `cordis.patch.yml`, addressed by the profile entry id —
+# here `remote-access-proxy`, the row this bundle declares.
+#
+# You normally do NOT need this file: open the Plugins page (sidebar →
+# Plugins), open the `dsh-remote-access-proxy` bundle, open the
+# `remote-access-proxy` row and use its 配置 page. That writes the same rows
+# into `data/profiles/<profile>/cordis.patch.yml` for you.
+#
+# Merge only the keys you want to pin — a key left out keeps the bundle layer's
+# value and then the schema default. Rows are addressed by id, so this user
+# layer overrides the bundle's row wholesale for the keys it states.
+#
+# `secretPath` / `cookieValue` are generated and written back on first start
+# when left empty; there is no need to fill them in.
+
+- id: remote-access-proxy
+  config:
+    enabled: true
+    # 监听地址：0.0.0.0 = 全部网卡（VPN/反代/局域网均可到达）；或填本机网卡具体 IP
+    listenHost: 0.0.0.0
+    listenPort: 40443
+    # 随机门禁路径（4–32 位字母数字、连字符或下划线；留空自动生成）
+    secretPath: CHANGE_ME_RANDOM_PATH
+    # 门禁 HttpOnly Cookie 值（至少 8 位；留空自动生成；改后旧 Cookie 立即失效）
+    cookieValue: CHANGE_ME_COOKIE_VALUE
+    # 上游 DSH 本体（默认 127.0.0.1:3080）
+    upstreamHost: 127.0.0.1
+    upstreamPort: 3080
+    # TLS：true 时用自签 pfx（浏览器需接受一次证书警告）；false = 明文 http
+    tlsEnabled: true
+    tlsPfxPath: .\data\certs\local-proxy.pfx
+    tlsPassphrase: CHANGE_ME_PFX_PASSPHRASE
+    # access.log 轮转：写入将超过 logMaxBytes 就先轮转，保留 logKeep 份旧文件
+    # （access.log.1…N）；0 = 不轮转 / 不留历史。默认 1048576 字节、3 份。
+    logMaxBytes: 1048576
+    logKeep: 3
