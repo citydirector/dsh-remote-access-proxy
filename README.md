@@ -58,6 +58,11 @@ The host row's id is load-bearing: on 0.1.7+ a plugin's settings namespace **is*
 profile entry id. A hand-copied install also has no bundle entry in the Plugins page,
 so it gets no 配置 page — edit the profile patch by hand instead.
 
+Two DSH apps that share one `$DSH_HOME` (the portable and desktop apps pointed at the same
+`data` directory) resolve the same profile patch, so both would bind the same `listenPort`.
+Keep one of them off with `enabled: false` (or a row-level `disabled: true`), or give each a
+different `listenPort`.
+
 ## Layout
 
 ```
@@ -120,7 +125,7 @@ remounted, the embedded server just restarts with the new values.
 |---|---|
 | `enabled` | Stop listening when disabled |
 | `listenHost` | Bind address (`0.0.0.0` = all interfaces) |
-| `listenPort` | Bind port |
+| `listenPort` | Bind port (default `13337`) |
 | `secretPath` | Random gate path (4–32 chars) |
 | `cookieValue` | Gate HttpOnly cookie value |
 | `upstreamHost` / `upstreamPort` | Upstream DSH (default `127.0.0.1:3080`) |

@@ -52,6 +52,10 @@ git 依赖的 commit 由 profile 的 `pnpm-lock.yaml` 钉住，普通 `pnpm inst
 宿主行的 id 是关键：0.1.7+ 里，插件的设置命名空间**就是**它的 profile entry id。
 另外手动安装没有 bundle 条目，插件页不会有配置页入口——直接改 profile patch 即可。
 
+共用同一个 `$DSH_HOME` 的两个 DSH app（便携版与桌面端指向同一个 `data` 目录）会解析同一份
+profile patch，因此都会尝试绑定同一个 `listenPort`。用 `enabled: false`（或行级 `disabled: true`）
+关掉其中一个，或者给两边配不同的 `listenPort`。
+
 ## 目录结构
 
 ```
@@ -108,7 +112,7 @@ profile patch。`secretPath` / `cookieValue` 留空时首次启动自动生成�
 |---|---|
 | `enabled` | 关闭后停止监听 |
 | `listenHost` | 监听地址（`0.0.0.0` = 全接口） |
-| `listenPort` | 监听端口 |
+| `listenPort` | 监听端口（默认 `13337`）|
 | `secretPath` | 随机门禁路径（4–32 位） |
 | `cookieValue` | 门禁 HttpOnly Cookie 值 |
 | `upstreamHost` / `upstreamPort` | 上游 DSH（默认 `127.0.0.1:3080`） |
