@@ -115,11 +115,18 @@ profile patch。`secretPath` / `cookieValue` 留空时首次启动自动生成�
 | `listenPort` | 监听端口（默认 `13337`）|
 | `secretPath` | 随机门禁路径（4–32 位） |
 | `cookieValue` | 门禁 HttpOnly Cookie 值 |
-| `upstreamHost` / `upstreamPort` | 上游 DSH（默认 `127.0.0.1:3080`） |
+| `upstreamHost` / `upstreamPort` | 上游 DSH。留空（`""` / `0`）时自动跟随当前实例（见下） |
 | `tlsEnabled` / `tlsPfxPath` / `tlsPassphrase` | 自签 TLS（pfx） |
 | `logMaxBytes` / `logKeep` | `access.log` 轮转：写入将超过此大小就先轮转（默认 `1048576` = 1 MiB），保留这么多份旧文件（默认 `3`）。`logMaxBytes: 0` = 不轮转；`logKeep: 0` = 不留历史 |
 
 入口：`https://<IP>:<端口>/<secretPath>/`（每设备接受一次自签证书警告）。
+
+### 上游地址
+
+`upstreamHost` / `upstreamPort` 指向本代理转发的 DSH 实例。留空时在启动时从所在进程实时
+发布的 `webStartup` 服务读取地址——`dsh web` 的 `--port`（默认 `3080`），或桌面端启动器
+固定写死的 `--port 19387`——因此不需要按实例配置。显式填写的值始终优先；读不到 Web 服务
+时退回历史上的 `127.0.0.1:3080`。解析结果会写进日志（`upstream 127.0.0.1:19387 (auto)`）。
 
 ## 日志轮转
 
@@ -165,12 +172,13 @@ DSH 0.1.7 移除了 `settings.yaml`，所以 0.3.0 在它上面加载不了。�
 pnpm install                      # 只需一次：插件要 import @deepseek-ai/schemastery
 node test-remote-access-proxy.mjs # 默认加载它旁边的插件（已安装的 bundle 副本也行：
                                   # DSH_PLUGIN=/path/to/plugin.mjs）
-# 期望：31 passed, 0 failed
+# 期望：36 passed, 0 failed
 ```
 
 它 mock 一个 DSH 上游（复刻 launchToken 交换 + `dsh-auth` Cookie 门禁），并 mock 插件
 周围的 0.1.7 宿主契约——volatile Config 引用、`loader/volatile-update`、profile 配置
-编辑器与页面策略调用——然后校验门禁放行/拒绝、Cookie 注入、token 剥离、303 Location
-重写、401 自愈、WS 升级、`access.log` 轮转（阈值、环、关断开关）、生成值回写、
+编辑器、编辑器所处的 HMR 事务守卫、`webStartup` 地址与页面策略调用——然后校验门禁
+放行/拒绝、Cookie 注入、token 剥离、303 Location 重写、401 自愈、WS 升级、`access.log`
+轮转（阈值、环、关断开关）、生成值回写（含先脱离热重载事务）、上游自动探测与显式覆盖、
 volatile 字段契约，以及 bundle/包布局（patch 行可解析到文件、元数据已打包、浏览器半
 注册了行配置页且覆盖每个字段）。测试会快照/还原整个日志环，不留痕。

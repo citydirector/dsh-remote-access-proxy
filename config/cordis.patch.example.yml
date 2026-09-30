@@ -26,9 +26,10 @@
     secretPath: CHANGE_ME_RANDOM_PATH
     # 门禁 HttpOnly Cookie 值（至少 8 位；留空自动生成；改后旧 Cookie 立即失效）
     cookieValue: CHANGE_ME_COOKIE_VALUE
-    # 上游 DSH 本体（默认 127.0.0.1:3080）
-    upstreamHost: 127.0.0.1
-    upstreamPort: 3080
+    # 上游 DSH 本体。留空 / 0 = 自动跟随当前实例（启动时读运行中的 webStartup
+    # 地址：dsh web 为 3080，桌面端启动器固定 19387）；显式值优先。
+    upstreamHost: ""
+    upstreamPort: 0
     # TLS：true 时用自签 pfx（浏览器需接受一次证书警告）；false = 明文 http
     tlsEnabled: true
     tlsPfxPath: .\data\certs\local-proxy.pfx

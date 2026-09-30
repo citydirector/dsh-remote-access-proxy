@@ -8,6 +8,10 @@
  * - Random-path + HttpOnly-cookie gate in front of the DSH app and its /api.
  * - Forwards to DSH with Host rewritten to loopback and Origin stripped, so
  *   the /api trust fence accepts any front — no per-host trustedHosts needed.
+ * - Forwards to the running DSH instance: `upstreamHost`/`upstreamPort` default
+ *   to auto-detect from the live `webStartup` service (`dsh web` listens on
+ *   3080, the desktop launcher pins 19387), so no configuration is needed;
+ *   explicit values override.
  * - Optional TLS (self-signed pfx): browsers require a secure context for
  *   crypto.randomUUID, so plain-HTTP remote access breaks the web client.
  * - Configured from the Plugins page: the bundle's row page (sidebar → Plugins
@@ -19,7 +23,7 @@
  *   long-running deployment cannot grow an unbounded log.
  *
  * DSH browser-auth bridge (2026-09-04): DSH now authenticates every browser
- * session with a per-process launch token (`http://127.0.0.1:3080/?token=…`)
+ * session with a per-process launch token (`http://<upstream>/?token=…`)
  * plus an authority-bound signed cookie (`dsh-auth-*`); without it every /api
  * request is 401. This proxy therefore performs the token exchange itself and
  * forwards carrying the minted DSH cookie, so remote users keep the old gate
@@ -49,7 +53,10 @@ export const name = "dsh-remote-access-proxy"
  * Required services. `connection` carries this process's launch token. The
  * settings service is deliberately NOT required: the plugin's configuration is
  * its own Config, so the proxy still runs — and still serves remote clients —
- * in a deployment that mounts no settings forms at all.
+ * in a deployment that mounts no settings forms at all. `webStartup` (upstream
+ * auto-detect), `configEditor` (persisting generated secrets) and `hmr`
+ * (leaving the current hot-reload transaction before editing) are read
+ * optionally through `ctx.get`.
  */
 export const inject = ["connection"]
 
@@ -91,8 +98,12 @@ export const Config = z.object({
   listenPort: z.number().default(13337).volatile(),
   secretPath: z.string().default("").volatile(),
   cookieValue: z.string().default("").volatile(),
-  upstreamHost: z.string().default("127.0.0.1").volatile(),
-  upstreamPort: z.number().default(3080).volatile(),
+  // Upstream DSH body. Empty host / port 0 mean "follow the running instance":
+  // the address is read from the live `webStartup` service at start time, so
+  // `dsh web` (3080) and the desktop launcher (`--port 19387`) both work without
+  // configuration. An explicit value always wins.
+  upstreamHost: z.string().default("").volatile(),
+  upstreamPort: z.number().default(0).volatile(),
   tlsEnabled: z.boolean().default(false).volatile(),
   tlsPfxPath: z.string().default("").volatile(),
   tlsPassphrase: z.string().default("").volatile(),
@@ -390,8 +401,9 @@ export function apply(ctx, config) {
    * Write generated values back into the active profile's plugin configuration.
    *
    * The values live in the profile's own `cordis.patch.yml`, so the write goes
-   * through the configuration editor — and only once the Loader has settled, or
-   * the edit would re-enter the reconcile that is still mounting this plugin.
+   * through the configuration editor — once the Loader has settled *and* outside
+   * the hot-reload transaction that is mounting this plugin, because the editor
+   * refuses to run re-entrantly ("HMR transactions cannot be nested").
    * Without an editor (a profile-less run) the generated values stay
    * process-local and change on the next start.
    */
@@ -407,9 +419,41 @@ export function apply(ctx, config) {
         log(`configuration write failed (${error?.message ?? error}); generated values are process-local`)
       })
     }
+    // `configEditor.edit` runs through `hmr.runExclusive`, and this plugin's
+    // apply()/commit runs *inside* HMR's transaction: the guard rejects with
+    // "HMR transactions cannot be nested". AsyncLocalStorage keeps the store on
+    // every continuation the transaction started — including one chained off
+    // `loader.await()` — so leaving the context explicitly is the only way out
+    // (the loader's own config watcher does the same). `runExclusive` then
+    // queues the edit behind the in-flight transaction.
+    const hmr = ctx.get?.("hmr")
+    const outside = hmr?.executing !== undefined && typeof hmr.executing.exit === "function"
+      ? (work) => hmr.executing.exit(work)
+      : (work) => work()
     const loader = ctx.root?.loader
-    if (loader !== undefined && typeof loader.await === "function") loader.await().then(write, write)
-    else queueMicrotask(write)
+    const settled = loader !== undefined && typeof loader.await === "function" ? loader.await() : Promise.resolve()
+    settled.then(() => outside(write), () => outside(write))
+  }
+
+  /**
+   * Resolve the upstream address this proxy fronts.
+   *
+   * Both fields may be left unset (empty host / port 0) to follow the running
+   * instance: the in-process web server publishes its address as `webStartup`,
+   * so `dsh web`'s `--port 3080` default and the desktop launcher's hard-coded
+   * `--port 19387` are picked up automatically. An explicit value always wins;
+   * the last resort is the historical loopback 127.0.0.1:3080.
+   */
+  function resolveUpstream(settings) {
+    const live = ctx.get?.("webStartup")
+    let host = settings.upstreamHost || live?.host || "127.0.0.1"
+    // A bind address is not a connect address: 0.0.0.0/:: mean "every host".
+    if (host === "0.0.0.0" || host === "::" || host === "[::]" || host === "*") host = "127.0.0.1"
+    const port = settings.upstreamPort || live?.port || 3080
+    if (!settings.upstreamHost || !settings.upstreamPort) {
+      log(`upstream ${host}:${port}${live === undefined ? " (webStartup unavailable, using fallback)" : " (auto)"}`)
+    }
+    return { upstreamHost: host, upstreamPort: port }
   }
 
   function ensureSecrets(settings) {
@@ -426,7 +470,7 @@ export function apply(ctx, config) {
   /** The launch token of this DSH process, read from the connection service. */
   function launchToken(settings) {
     try {
-      const base = `http://${settings.upstreamHost || "127.0.0.1"}:${settings.upstreamPort || 3080}`
+      const base = `http://${settings.upstreamHost}:${settings.upstreamPort}`
       return new URL(ctx.connection.authenticatedUrl(base)).searchParams.get("token") || undefined
     } catch (err) {
       log(`launch token unavailable (${err.message})`)
@@ -436,8 +480,8 @@ export function apply(ctx, config) {
 
   /** Exchange the launch token for DSH's authority-bound session cookie. */
   function exchangeDshCookie(settings) {
-    const host = settings.upstreamHost || "127.0.0.1"
-    const port = settings.upstreamPort || 3080
+    const host = settings.upstreamHost
+    const port = settings.upstreamPort
     const token = launchToken(settings)
     if (!token) return Promise.resolve(undefined)
     return new Promise((resolve) => {
@@ -489,7 +533,7 @@ export function apply(ctx, config) {
 
   function start(settings) {
     stop()
-    const resolved = ensureSecrets(settings)
+    const resolved = ensureSecrets({ ...settings, ...resolveUpstream(settings) })
     current = resolved
     if (!resolved.enabled) {
       log("disabled")

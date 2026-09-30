@@ -128,11 +128,20 @@ remounted, the embedded server just restarts with the new values.
 | `listenPort` | Bind port (default `13337`) |
 | `secretPath` | Random gate path (4–32 chars) |
 | `cookieValue` | Gate HttpOnly cookie value |
-| `upstreamHost` / `upstreamPort` | Upstream DSH (default `127.0.0.1:3080`) |
+| `upstreamHost` / `upstreamPort` | Upstream DSH. Left empty (`""` / `0`) the address is auto-detected from the running instance (see below) |
 | `tlsEnabled` / `tlsPfxPath` / `tlsPassphrase` | Self-signed TLS (pfx) |
 | `logMaxBytes` / `logKeep` | `access.log` rotation: rotate once a write would pass this size (default `1048576` = 1 MiB) and keep this many older files (default `3`). `logMaxBytes: 0` = never rotate; `logKeep: 0` = keep no history |
 
 Entry: `https://<IP>:<port>/<secretPath>/` (accept the self-signed certificate once per device).
+
+### Upstream address
+
+`upstreamHost` / `upstreamPort` name the DSH instance this proxy fronts. Left empty the
+address is read at start time from the live `webStartup` service of the process it runs
+in — `dsh web`'s `--port` (default `3080`), or the desktop launcher's fixed
+`--port 19387` — so a deployment needs no per-instance configuration. Explicit values
+always win; with no web server to read, the historical `127.0.0.1:3080` is the last
+resort. The resolved address is logged (`upstream 127.0.0.1:19387 (auto)`).
 
 ## Log rotation
 
@@ -187,14 +196,16 @@ version bump plus one one-shot import:
 pnpm install                      # once: the plugin imports @deepseek-ai/schemastery
 node test-remote-access-proxy.mjs # loads the plugin beside it (an installed bundle copy
                                   # works too: DSH_PLUGIN=/path/to/plugin.mjs)
-# Expected: 31 passed, 0 failed
+# Expected: 36 passed, 0 failed
 ```
 
 It mocks a DSH upstream (launch-token exchange + `dsh-auth` cookie gate) and the 0.1.7
 host contract around the plugin — volatile Config references, `loader/volatile-update`,
-the profile configuration editor and the page-policy call — then checks the gate, cookie
+the profile configuration editor, the HMR transaction guard the editor runs inside, the
+`webStartup` address, and the page-policy call — then checks the gate, cookie
 injection, token stripping, 303 Location rewrite, 401 self-heal, WS upgrade,
-`access.log` rotation (cap, ring, off switch), generated-secret write-back, the
-volatile-field contract, and the bundle/package layout (patch rows resolve, metadata is
-packaged, the browser half registers the row page and edits every field). It snapshots
-and restores the whole log ring so runs leave no trace.
+`access.log` rotation (cap, ring, off switch), generated-secret write-back (including
+leaving the hot-reload transaction first), upstream auto-detect and explicit override,
+the volatile-field contract, and the bundle/package layout (patch rows resolve, metadata
+is packaged, the browser half registers the row page and edits every field). It
+snapshots and restores the whole log ring so runs leave no trace.

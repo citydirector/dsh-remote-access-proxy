@@ -82,6 +82,7 @@ function sleep(ms) {
 function createMockDsh() {
   let validCookie = null // cookie value the mock currently accepts
   let rejectHeld = false // test knob: reject whatever cookie the client holds
+  let exchanges = 0 // launch-token exchanges served (proves who was forwarded to)
   const cookieName = "dsh-auth-mock"
 
   const server = http.createServer((req, res) => {
@@ -90,6 +91,7 @@ function createMockDsh() {
 
     // launch-token exchange on GET /?token=...
     if (url.pathname === "/" && url.searchParams.get("token") === LAUNCH_TOKEN && !cookie) {
+      exchanges += 1
       validCookie = "v1.mockbody.sig-" + randomBytes(8).toString("hex")
       res.writeHead(303, {
         location: "./",
@@ -151,6 +153,9 @@ function createMockDsh() {
       set rejectHeld(v) {
         rejectHeld = v
       },
+      get exchanges() {
+        return exchanges
+      },
     }))
   })
 }
@@ -164,7 +169,7 @@ function createMockDsh() {
  * `_commit(patch)` is the Loader half: it moves the references and re-fires
  * `loader/volatile-update`, exactly as `Entry._commitVolatile` does.
  */
-function createCtx(initial, connection) {
+function createCtx(initial, connection, { webStartup } = {}) {
   const state = { ...initial }
   const refs = {}
   for (const field of Object.keys(state)) refs[field] = { get: () => state[field] }
@@ -172,6 +177,34 @@ function createCtx(initial, connection) {
   const writes = []
   const pagePolicies = []
   const injected = []
+  const stats = { escapes: 0, nestedRejections: 0 }
+  // Mirrors `dsh-hmr`: an AsyncLocalStorage marking the caller as inside a
+  // hot-reload transaction, the `exit()` escape hatch the Loader itself uses
+  // (`watchConfig`), and the guard that rejects re-entrant edits.
+  let inTransaction = false
+  const executing = {
+    getStore: () => (inTransaction ? true : undefined),
+    run(_value, fn) {
+      const before = inTransaction
+      inTransaction = true
+      try {
+        return fn()
+      } finally {
+        inTransaction = before
+      }
+    },
+    exit(fn) {
+      const before = inTransaction
+      inTransaction = false
+      stats.escapes += 1
+      try {
+        return fn()
+      } finally {
+        inTransaction = before
+      }
+    },
+  }
+  const hmr = { executing }
   const settingsStub = {
     configure(presentation, owner) {
       pagePolicies.push({ presentation, owner })
@@ -183,7 +216,10 @@ function createCtx(initial, connection) {
     fiber: { entry: { options: { id: ROW_ID, name: "./plugin/dsh-remote-access-proxy.mjs", config: undefined } } },
     root: { loader: { await: () => Promise.resolve() } },
     get(name) {
-      return name === "configEditor" ? editor : undefined
+      if (name === "configEditor") return editor
+      if (name === "hmr") return hmr
+      if (name === "webStartup") return webStartup
+      return undefined
     },
     inject(deps, callback) {
       injected.push([...deps])
@@ -202,6 +238,11 @@ function createCtx(initial, connection) {
     _writes: writes,
     _pagePolicies: pagePolicies,
     _injected: injected,
+    _stats: stats,
+    /** Put the caller inside a hot-reload transaction (as the Loader mounts us). */
+    _setTransaction(value) {
+      inTransaction = value
+    },
     /** Loader's volatile commit: move the references, then notify the owner. */
     _commit(patch) {
       Object.assign(state, patch)
@@ -213,6 +254,10 @@ function createCtx(initial, connection) {
   }
   const editor = {
     async edit(target, change) {
+      if (executing.getStore()) {
+        stats.nestedRejections += 1
+        throw new Error("HMR transactions cannot be nested")
+      }
       const next = change({ ...(target.options.config ?? {}) }, {})
       target.options.config = next
       writes.push(next)
@@ -247,6 +292,17 @@ function readPackage(root, pluginDir) {
   return { pkg, root, patchPath, patch, rows, clientPath, clientSource }
 }
 
+/** A free loopback port, closed again so a listener can bind it deterministically. */
+function freePort() {
+  return new Promise((resolve) => {
+    const s = http.createServer()
+    s.listen(0, "127.0.0.1", () => {
+      const p = s.address().port
+      s.close(() => resolve(p))
+    })
+  })
+}
+
 async function main() {
   const mock = await createMockDsh()
   console.log(`mock DSH upstream on 127.0.0.1:${mock.port}, launch token present`)
@@ -257,13 +313,7 @@ async function main() {
   const layout = readPackage(root, pluginDir)
 
   // Reserve an explicit free port so the proxy's bound port is deterministic.
-  const proxyPort = await new Promise((resolve) => {
-    const s = http.createServer()
-    s.listen(0, "127.0.0.1", () => {
-      const p = s.address().port
-      s.close(() => resolve(p))
-    })
-  })
+  const proxyPort = await freePort()
 
   const connection = {
     authenticatedUrl(base) {
@@ -289,6 +339,11 @@ async function main() {
     },
     connection,
   )
+  // The Loader mounts this plugin inside an HMR transaction, and every volatile
+  // commit arrives the same way; `configEditor.edit` refuses to run re-entrantly
+  // ("HMR transactions cannot be nested"), so the write-back has to leave that
+  // context first. Stay inside a transaction for the whole run to prove it.
+  ctx2._setTransaction(true)
   plugin.apply(ctx2, ctx2._refs)
   console.log(`proxy listening on 127.0.0.1:${proxyPort}`)
   await sleep(150)
@@ -300,6 +355,11 @@ async function main() {
   const generatedCookie = ctx2._state.cookieValue || writeBack.cookieValue
   check("generates a gate path and persists it to the profile", typeof writeBack.secretPath === "string" && writeBack.secretPath.length === 12, JSON.stringify(writeBack))
   check("generates a gate cookie value and persists it", typeof writeBack.cookieValue === "string" && writeBack.cookieValue.length === 24, JSON.stringify(writeBack))
+  check(
+    "escapes the hot-reload transaction before editing the profile",
+    ctx2._stats.escapes >= 1 && ctx2._stats.nestedRejections === 0,
+    JSON.stringify(ctx2._stats),
+  )
   // Emulate Loader reconciling the profile patch: commit what was written.
   ctx2._commit(writeBack)
   await sleep(150)
@@ -379,6 +439,79 @@ async function main() {
   const afterDisable = await httpReq(proxyPort, { path: `/${generatedPath}/` }).catch(() => ({ status: "conn-error" }))
   check("volatile enabled=false stops the listener", afterDisable.status === "conn-error", `got ${afterDisable.status}`)
 
+  // 8b) upstream auto-detect: an empty host / port 0 follow the running
+  //     instance's published `webStartup` address instead of the historical 3080
+  //     default — this is what makes the desktop launcher (`--port 19387`) work
+  //     without any configuration.
+  const autoMock = await createMockDsh()
+  const autoPort = await freePort()
+  const ctx3 = createCtx(
+    {
+      enabled: true,
+      listenHost: "127.0.0.1",
+      listenPort: autoPort,
+      secretPath: "",
+      cookieValue: "",
+      upstreamHost: "",
+      upstreamPort: 0,
+      tlsEnabled: false,
+      tlsPfxPath: "",
+      tlsPassphrase: "",
+      logMaxBytes: 1024 * 1024,
+      logKeep: 3,
+    },
+    connection,
+    { webStartup: { host: "127.0.0.1", port: autoMock.port } },
+  )
+  plugin.apply(ctx3, ctx3._refs)
+  await sleep(150)
+  check("auto-detects the upstream from webStartup", autoMock.exchanges > 0, `exchanges=${autoMock.exchanges}`)
+  const autoPath = ctx3._writes[0]?.secretPath
+  const autoGate = `dsh_et_gate=${ctx3._writes[0]?.cookieValue}`
+  r = await httpReq(autoPort, { path: `/${autoPath}/`, headers: { cookie: autoGate } })
+  check("the auto-detected proxy serves the entry", r.status === 200 && r.body.includes("index ok"), `got ${r.status} ${r.body}`)
+  let autoLogged = true
+  try {
+    autoLogged = readFileSync(REAL_LOG, "utf8").includes(`upstream 127.0.0.1:${autoMock.port} (auto)`)
+  } catch {
+    autoLogged = false
+  }
+  check("logs the auto-detected upstream", autoLogged)
+
+  // An explicit address always wins over the live webStartup one.
+  const explicitPort = await freePort()
+  const mockBefore = mock.exchanges
+  const autoBefore = autoMock.exchanges
+  const ctx4 = createCtx(
+    {
+      enabled: true,
+      listenHost: "127.0.0.1",
+      listenPort: explicitPort,
+      secretPath: "",
+      cookieValue: "",
+      upstreamHost: "127.0.0.1",
+      upstreamPort: mock.port,
+      tlsEnabled: false,
+      tlsPfxPath: "",
+      tlsPassphrase: "",
+      logMaxBytes: 1024 * 1024,
+      logKeep: 3,
+    },
+    connection,
+    { webStartup: { host: "127.0.0.1", port: autoMock.port } },
+  )
+  plugin.apply(ctx4, ctx4._refs)
+  await sleep(150)
+  check(
+    "an explicit upstream wins over webStartup",
+    mock.exchanges > mockBefore && autoMock.exchanges === autoBefore,
+    `mock=${mock.exchanges} auto=${autoMock.exchanges}`,
+  )
+  ctx3._disposeAll()
+  ctx4._disposeAll()
+  autoMock.server.close()
+  await sleep(50)
+
   // 9) access.log rotation: a tiny cap must rotate into access.log.1 and keep the
   //    live file under the cap. Each gate miss logs one DENY line.
   ctx2._commit({ enabled: true, logMaxBytes: 300, logKeep: 2 })
@@ -423,8 +556,9 @@ async function main() {
     "Config parses into live references carrying their schema defaults",
     typeof defaults.listenHost?.get === "function" && defaults.listenHost.get() === "0.0.0.0"
       && typeof defaults.enabled?.get === "function" && defaults.enabled.get() === true
-      && defaults.logMaxBytes.get() === 1048576,
-    JSON.stringify({ listenHost: defaults.listenHost?.get?.(), logMaxBytes: defaults.logMaxBytes?.get?.() }),
+      && defaults.logMaxBytes.get() === 1048576
+      && defaults.upstreamHost.get() === "" && defaults.upstreamPort.get() === 0,
+    JSON.stringify({ listenHost: defaults.listenHost?.get?.(), logMaxBytes: defaults.logMaxBytes?.get?.(), upstreamPort: defaults.upstreamPort?.get?.() }),
   )
   let serializes = true
   try {

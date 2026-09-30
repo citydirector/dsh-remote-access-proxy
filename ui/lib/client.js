@@ -55,8 +55,8 @@ window.__ModuleLoader__.load({
       { spec: booleanField("tlsEnabled"), kind: "boolean", label: "启用 TLS", hint: "开：https（需接受一次自签证书警告）；关：明文 http" },
       { spec: settingsTextField("tlsPfxPath"), kind: "text", label: "TLS 证书 (pfx)", hint: "启用 TLS 时必填，指向 pfx 文件" },
       { spec: settingsTextField("tlsPassphrase"), kind: "text", label: "TLS 证书口令", hint: "导出 pfx 时设置的口令" },
-      { spec: settingsTextField("upstreamHost"), kind: "text", label: "上游主机", hint: "转发目标（默认 127.0.0.1，即 DSH 本体）" },
-      { spec: settingsNumberField("upstreamPort"), kind: "number", label: "上游端口", hint: "转发目标端口（默认 3080）" },
+      { spec: settingsTextField("upstreamHost"), kind: "text", label: "上游主机", hint: "转发目标；留空 = 自动跟随当前 DSH 实例（回退 127.0.0.1）" },
+      { spec: settingsNumberField("upstreamPort"), kind: "number", label: "上游端口", hint: "转发目标端口；0 = 自动跟随当前 DSH 实例（dsh web 3080 / 桌面端 19387）" },
       { spec: settingsNumberField("logMaxBytes"), kind: "number", label: "日志上限 (字节)", hint: "access.log 超过此大小即轮转；0 = 不轮转（默认 1048576 = 1 MiB）" },
       { spec: settingsNumberField("logKeep"), kind: "number", label: "日志保留份数", hint: "轮转后保留 access.log.1…N 的份数；0 = 不留历史，直接清空（默认 3）" },
     ];
