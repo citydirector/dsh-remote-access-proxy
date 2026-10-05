@@ -414,8 +414,18 @@ export function apply(ctx, config) {
       log("no profile configuration editor; generated values are process-local")
       return
     }
-    const write = () => {
+    // HMR's guard rejects re-entrant edits with this exact message; another
+    // transaction (ours, or a peer plugin's) may still be in flight.
+    const NESTED = /HMR transactions cannot be nested/i
+    const MAX_ATTEMPTS = 5
+    const write = (attempts = MAX_ATTEMPTS) => {
       editor.edit(entry, (existing = {}) => ({ ...existing, ...patch })).catch((error) => {
+        const message = error?.message ?? String(error)
+        if (attempts > 0 && NESTED.test(message)) {
+          // Retry outside the current async store rather than dropping the value.
+          setTimeout(() => outside(() => write(attempts - 1)), 250)
+          return
+        }
         log(`configuration write failed (${error?.message ?? error}); generated values are process-local`)
       })
     }
