@@ -50,7 +50,7 @@ window.__ModuleLoader__.load({
     // ---- copy ----------------------------------------------------------------
     const COPY = {
       zh: {
-        summary: "在手机或其它电脑上用浏览器访问 DSH：随机路径 + HttpOnly Cookie 门禁，自动桥接启动 token",
+        summary: "在手机或其它电脑上用浏览器访问 DSH：随机路径入口，可选访问密码和来源地址白名单",
         statusTitle: "状态",
         listening: "运行中",
         starting: "启动中…",
@@ -59,7 +59,10 @@ window.__ModuleLoader__.load({
         unknown: "读取状态中…",
         unreachable: "读不到代理状态（插件可能未运行）",
         entries: "入口地址",
-        entriesHint: "在同一网络（局域网 / VPN / 反代）的设备上用浏览器打开其中一个地址。首次打开会写入门禁 Cookie，之后整个站点可用。",
+        entriesHint: "在同一网络（局域网 / VPN / 反代）的设备上用浏览器打开其中一个地址，存成书签或添加到主屏幕即可。",
+        passwordOn: "需要密码：登录后这台设备会被记住 30 天。",
+        allowSummary: "只允许来自：{list}（本机始终允许）",
+        denied: "刚刚拒绝了 {address} 的连接。如果这是你的设备，把它加进「允许的来源地址」。",
         copy: "复制",
         copied: "已复制",
         remoteNote: "远程页面只能使用 DSH，不能修改设置；API Key、模型等请在本机配置。",
@@ -68,14 +71,16 @@ window.__ModuleLoader__.load({
         groupGate: "门禁",
         groupTls: "加密（TLS）",
         groupAdvanced: "高级",
-        regenerate: "重新生成路径与 Cookie",
-        regenerateHint: "保存后旧入口和所有已登录设备立即失效",
+        regenerate: "重新生成入口路径",
+        regenerateHint: "保存后旧地址失效，所有设备都需要用新地址重新进入",
+        presetPrivate: "只允许局域网和 VPN",
+        presetAny: "允许任何地址",
         fields: {
           enabled: ["启用", "关闭后代理停止监听"],
-          listenHost: ["监听地址", "0.0.0.0 = 所有网卡；或填本机某块网卡的 IP（如 VPN 虚拟网卡 10.0.0.5）"],
-          listenPort: ["监听端口", "1–65535，默认 13337"],
+          listenPort: ["监听端口", "1–65535，默认 13337；代理在本机所有网卡上监听"],
+          allowFrom: ["允许的来源地址", "客户端的 IP、网段或范围，用逗号分隔，例如 192.168.1.0/24, 100.64.0.0/10, 10.0.0.5-10.0.0.9；留空 = 不限制"],
           secretPath: ["随机路径", "入口 = <地址>:<端口>/<随机路径>/；4–32 位字母、数字、- 或 _"],
-          cookieValue: ["门禁 Cookie", "8 位以上字母、数字、- 或 _；改后已登录设备需重新从入口进入"],
+          password: ["访问密码", "留空 = 不需要密码；修改后所有设备需要重新登录"],
           tlsEnabled: ["启用 TLS", "开：https（浏览器需接受一次自签证书）；关：明文 http"],
           tlsPfxPath: ["证书文件 (.pfx)", "启用 TLS 时必填；相对路径相对于 DSH 的工作目录"],
           tlsPassphrase: ["证书口令", "导出 pfx 时设置的口令，没有就留空"],
@@ -100,17 +105,17 @@ window.__ModuleLoader__.load({
         off: "关",
         reasons: {
           "port-in-use": "端口 {port} 已被占用：换一个端口，或关掉占用它的程序（两个 DSH 共用同一个 profile 也会这样）",
-          "bad-address": "{host} 不是本机的地址：填 0.0.0.0，或本机某块网卡的 IP",
+          "bad-allow": "这些来源地址写法不对：{detail}。可以写 IP（10.0.0.5）、网段（10.0.0.0/24）或范围（10.0.0.5-10.0.0.9）",
+          "bad-password": "访问密码最长 256 个字符",
           "port-denied": "没有权限监听端口 {port}：换一个 1024 以上的端口",
           "bad-port": "监听端口要是 1–65535 的整数",
           "bad-secret-path": "随机路径只能是 4–32 位字母、数字、- 或 _",
-          "bad-cookie": "门禁 Cookie 只能是 8 位以上字母、数字、- 或 _",
           "tls-no-cert": "启用 TLS 需要先填证书文件 (.pfx)",
           "tls-load": "证书读不出来：检查证书路径和口令",
         },
       },
       en: {
-        summary: "Use DSH from your phone or another computer: random-path + HttpOnly-cookie gate, bridged to the launch token",
+        summary: "Use DSH from your phone or another computer: a secret-path entry with an optional password and client allow list",
         statusTitle: "Status",
         listening: "Running",
         starting: "Starting…",
@@ -119,7 +124,10 @@ window.__ModuleLoader__.load({
         unknown: "Reading status…",
         unreachable: "Can't read the proxy status (the plugin may not be running)",
         entries: "Entry addresses",
-        entriesHint: "Open one of these in a browser on a device on the same network (LAN, VPN, or behind your reverse proxy). The first visit sets the gate cookie; after that the whole site works.",
+        entriesHint: "Open one of these in a browser on a device on the same network (LAN, VPN, or behind your reverse proxy), then bookmark it or add it to the home screen.",
+        passwordOn: "Password required: a signed-in device is remembered for 30 days.",
+        allowSummary: "Only from: {list} (this machine is always allowed)",
+        denied: "Just turned away a connection from {address}. If that's your device, add it to Allowed client addresses.",
         copy: "Copy",
         copied: "Copied",
         remoteNote: "Remote pages can use DSH but not change its settings; set the API key and models on this machine.",
@@ -128,14 +136,16 @@ window.__ModuleLoader__.load({
         groupGate: "Gate",
         groupTls: "Encryption (TLS)",
         groupAdvanced: "Advanced",
-        regenerate: "Regenerate path and cookie",
-        regenerateHint: "After saving, the old address and every signed-in device stop working",
+        regenerate: "Regenerate the entry path",
+        regenerateHint: "After saving, the old address stops working and every device re-enters with the new one",
+        presetPrivate: "LAN and VPN only",
+        presetAny: "Allow any address",
         fields: {
           enabled: ["Enabled", "Turn off to stop listening"],
-          listenHost: ["Listen address", "0.0.0.0 = every interface, or one address of this machine (e.g. a VPN adapter's 10.0.0.5)"],
-          listenPort: ["Listen port", "1–65535, default 13337"],
+          listenPort: ["Listen port", "1–65535, default 13337; the proxy listens on every interface of this machine"],
+          allowFrom: ["Allowed client addresses", "Client IPs, CIDR blocks or ranges, comma-separated, e.g. 192.168.1.0/24, 100.64.0.0/10, 10.0.0.5-10.0.0.9; empty = anyone"],
           secretPath: ["Secret path", "Entry = <address>:<port>/<secret path>/; 4–32 letters, digits, - or _"],
-          cookieValue: ["Gate cookie", "8+ letters, digits, - or _; signed-in devices re-enter through the entry after a change"],
+          password: ["Access password", "Empty = no password; changing it signs every device out"],
           tlsEnabled: ["Enable TLS", "On: https (accept the self-signed certificate once); off: plain http"],
           tlsPfxPath: ["Certificate (.pfx)", "Required with TLS; relative paths resolve from DSH's working directory"],
           tlsPassphrase: ["Certificate passphrase", "The passphrase set when exporting the pfx; leave empty if none"],
@@ -160,11 +170,11 @@ window.__ModuleLoader__.load({
         off: "Off",
         reasons: {
           "port-in-use": "Port {port} is already in use: pick another port, or close the program holding it (two DSH apps sharing one profile do this too)",
-          "bad-address": "{host} is not an address of this machine: use 0.0.0.0 or one of its interface addresses",
+          "bad-allow": "These client addresses aren't valid: {detail}. Use an IP (10.0.0.5), a CIDR block (10.0.0.0/24) or a range (10.0.0.5-10.0.0.9)",
+          "bad-password": "The access password can be at most 256 characters",
           "port-denied": "No permission to listen on port {port}: pick a port above 1024",
           "bad-port": "The listen port must be an integer from 1 to 65535",
           "bad-secret-path": "The secret path must be 4–32 letters, digits, - or _",
-          "bad-cookie": "The gate cookie must be 8+ letters, digits, - or _",
           "tls-no-cert": "TLS needs a certificate file (.pfx) first",
           "tls-load": "The certificate could not be loaded: check its path and passphrase",
         },
@@ -188,12 +198,15 @@ window.__ModuleLoader__.load({
     const GROUPS = [
       { title: "groupAccess", fields: [
         { spec: booleanField("enabled"), kind: "boolean" },
-        { spec: settingsTextField("listenHost"), kind: "text" },
         { spec: settingsNumberField("listenPort"), kind: "number" },
+        { spec: settingsTextField("allowFrom"), kind: "text", presets: true },
       ] },
       { title: "groupGate", gate: true, fields: [
         { spec: settingsTextField("secretPath"), kind: "text" },
-        { spec: settingsTextField("cookieValue"), kind: "text" },
+        { spec: settingsTextField("password"), kind: "text", secret: true },
+        // The server secret that signs remembered devices: edited only by the
+        // regenerate button, never shown.
+        { spec: settingsTextField("cookieValue"), kind: "text", hidden: true },
       ] },
       { title: "groupTls", fields: [
         { spec: booleanField("tlsEnabled"), kind: "boolean" },
@@ -208,6 +221,10 @@ window.__ModuleLoader__.load({
       ] },
     ];
     const FIELDS = GROUPS.flatMap((group) => group.fields);
+    /** Private LANs, CGNAT/Tailscale, IPv6 ULA and link-local (matches the host's PRIVATE_NETWORKS). */
+    const PRIVATE_NETWORKS = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7, fe80::/10";
+    /** Mask a secret field until it is focused (the shared field is a plain text input). */
+    const SECRET_STYLE = "[data-rap-secret] input:not(:focus){-webkit-text-security:disc;text-security:disc}";
 
     /** A random lowercase alphanumeric token (getRandomValues works on any origin). */
     function randomToken(length) {
@@ -343,13 +360,18 @@ window.__ModuleLoader__.load({
         const template = t.reasons[status.code];
         const text = template === undefined
           ? status.error
-          : template.replace("{port}", String(status.listenPort)).replace("{host}", String(status.listenHost));
+          : template.replace("{port}", String(status.listenPort)).replace("{detail}", String(status.detail ?? ""));
         children.push(h("p", { key: "reason", style: S.reason, title: status.error }, text));
       }
       if (state === "listening" && Array.isArray(status.urls) && status.urls.length > 0) {
         children.push(h("p", { key: "label", style: S.label }, t.entries));
         for (const url of status.urls) children.push(h(EntryUrl, { key: url, url, t }));
         children.push(h("p", { key: "hint", style: S.note }, t.entriesHint));
+        if (status.password) children.push(h("p", { key: "pw", style: S.note }, t.passwordOn));
+        if (Array.isArray(status.allowFrom) && status.allowFrom.length > 0) {
+          children.push(h("p", { key: "allow", style: S.note }, t.allowSummary.replace("{list}", status.allowFrom.join(", "))));
+        }
+        if (status.lastDenied) children.push(h("p", { key: "denied", style: S.warn }, t.denied.replace("{address}", status.lastDenied.address)));
         if (!status.tls) children.push(h("p", { key: "tls", style: S.warn }, t.tlsNote));
         children.push(h("p", { key: "remote", style: S.note }, t.remoteNote));
       }
@@ -429,12 +451,25 @@ window.__ModuleLoader__.load({
           onEdit: (value) => props.edit(name, value),
         };
         if (entry.kind === "boolean") return h(ToggleField, shared);
-        return h(ValueField, { ...shared, numeric: entry.kind === "number", placeholder: entry.auto ? t.auto : undefined });
+        const input = h(ValueField, { ...shared, numeric: entry.kind === "number", placeholder: entry.auto ? t.auto : undefined });
+        if (entry.secret) return h("div", { key: name, "data-rap-secret": "" }, input);
+        if (!entry.presets) return input;
+        return h(
+          "div",
+          { key: name },
+          input,
+          h(
+            "div",
+            { style: S.regen },
+            h(Button, { variant: "outline", size: "sm", disabled: !state.writable, onClick: () => props.edit(name, PRIVATE_NETWORKS) }, t.presetPrivate),
+            h(Button, { variant: "ghost", size: "sm", disabled: !state.writable, onClick: () => props.edit(name, "") }, t.presetAny),
+          ),
+        );
       };
       const body = [];
       for (const group of GROUPS) {
         body.push(h("h4", { key: "title-" + group.title, style: S.groupTitle }, t[group.title]));
-        for (const entry of group.fields) body.push(field(entry));
+        for (const entry of group.fields) if (!entry.hidden) body.push(field(entry));
         if (group.gate) {
           body.push(
             h(
@@ -461,6 +496,7 @@ window.__ModuleLoader__.load({
       return h(
         "div",
         null,
+        h("style", null, SECRET_STYLE),
         h(StatusPanel, { status, t }),
         h(SettingsForm, { labels: t.form, state, onSave: props.save, onDiscard: props.discard }, body),
       );

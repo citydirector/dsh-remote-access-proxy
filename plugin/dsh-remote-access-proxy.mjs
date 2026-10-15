@@ -3,9 +3,11 @@
  * host-plane plugin.
  *
  * - Starts/stops with DSH (plugin apply/dispose), no external tool needed.
- * - Binds to the configured interface (any VPN/network segment; easytier,
- *   ZeroTier, Tailscale, or a plain LAN/reverse-proxy front all work).
- * - Random-path + HttpOnly-cookie gate in front of the DSH app and its /api.
+ * - Listens on every interface (easytier, ZeroTier, Tailscale, a plain LAN or
+ *   a reverse-proxy front all work); `allowFrom` decides which client
+ *   addresses may connect, dropping the rest at the TCP level.
+ * - Random-path gate, an optional password sign-in, and a signed 30-day
+ *   remembered-device cookie in front of the DSH app and its /api.
  * - Forwards to DSH with Host rewritten to loopback and Origin stripped, so
  *   the /api trust fence accepts any front — no per-host trustedHosts needed.
  * - Forwards to the running DSH instance: `upstreamHost`/`upstreamPort` default
@@ -43,7 +45,8 @@
 
 import http from "node:http"
 import https from "node:https"
-import { randomBytes } from "node:crypto"
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto"
+import { BlockList, isIP } from "node:net"
 import { appendFileSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { networkInterfaces } from "node:os"
 import { fileURLToPath } from "node:url"
@@ -75,6 +78,16 @@ export const STATUS_ROUTE = "/api/remote-access-proxy/status"
 const SECRET_PATH_PATTERN = /^[A-Za-z0-9_-]{4,32}$/
 /** What a gate cookie value may contain: a cookie-octet subset without separators. */
 const COOKIE_VALUE_PATTERN = /^[A-Za-z0-9_-]{8,128}$/
+/** How long a remembered device stays signed in. */
+const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
+/** Internal routes below the gate path (the login form posts here). */
+const LOGIN_ROUTE = "/__rap/login"
+const LOGOUT_ROUTE = "/__rap/logout"
+/** Failed password attempts allowed per client address in LOGIN_WINDOW_MS. */
+const LOGIN_MAX_FAILURES = 5
+const LOGIN_WINDOW_MS = 5 * 60 * 1000
+/** A ready-made allow list: private LANs, CGNAT/Tailscale, IPv6 ULA and link-local. */
+export const PRIVATE_NETWORKS = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7, fe80::/10"
 /** Rotation defaults, used when a settings object predates the log fields. */
 const DEFAULT_LOG_MAX_BYTES = 1024 * 1024
 const DEFAULT_LOG_KEEP = 3
@@ -82,9 +95,10 @@ const DEFAULT_LOG_KEEP = 3
 /** Every configurable field, in card order. */
 const FIELDS = [
   "enabled",
-  "listenHost",
   "listenPort",
+  "allowFrom",
   "secretPath",
+  "password",
   "cookieValue",
   "upstreamHost",
   "upstreamPort",
@@ -104,9 +118,16 @@ const FIELDS = [
  */
 export const Config = z.object({
   enabled: z.boolean().default(true).volatile(),
-  listenHost: z.string().default("0.0.0.0").volatile(),
   listenPort: z.number().default(13337).volatile(),
+  // Which client addresses may connect: IPs, CIDR blocks or a-b ranges,
+  // separated by commas, spaces or new lines. Empty = any address. The proxy
+  // always listens on every interface; loopback is always allowed.
+  allowFrom: z.string().default("").volatile(),
   secretPath: z.string().default("").volatile(),
+  // Optional access password. Empty = the secret path alone opens the site.
+  password: z.string().default("").volatile(),
+  // Server-side secret that signs the remembered-device cookie. Generated, never
+  // shown on the page; regenerating it signs every device out.
   cookieValue: z.string().default("").volatile(),
   // Upstream DSH body. Empty host / port 0 mean "follow the running instance":
   // the address is read from the live `webStartup` service at start time, so
@@ -144,14 +165,73 @@ export function genToken(length) {
 }
 
 /**
- * The addresses a remote device can reach this listener on: the bind address
- * itself, or every external IPv4 interface when bound to all of them.
+ * Parse an allow list: IPs, CIDR blocks (`10.0.0.0/8`, `fd00::/8`) and ranges
+ * (`192.168.1.10-192.168.1.20`), separated by commas, semicolons or whitespace.
  *
- * @param listenHost - the configured bind address.
+ * @param text - the configured `allowFrom` value.
+ * @returns `{ entries, bad, list }`; `list` is undefined when every address may connect.
+ */
+export function parseAllowList(text) {
+  const entries = String(text ?? "").split(/[\s,;]+/).filter(Boolean)
+  const bad = []
+  if (entries.length === 0) return { entries, bad, list: undefined }
+  const list = new BlockList()
+  const family = (ip) => (isIP(ip) === 6 ? "ipv6" : "ipv4")
+  for (const entry of entries) {
+    const slash = entry.indexOf("/")
+    const dash = entry.indexOf("-")
+    try {
+      if (slash > 0) {
+        const ip = entry.slice(0, slash)
+        const bits = Number(entry.slice(slash + 1))
+        const max = isIP(ip) === 6 ? 128 : 32
+        if (!isIP(ip) || !/^\d+$/.test(entry.slice(slash + 1)) || bits > max) throw new Error("bad cidr")
+        list.addSubnet(ip, bits, family(ip))
+      } else if (dash > 0) {
+        const from = entry.slice(0, dash)
+        const to = entry.slice(dash + 1)
+        if (!isIP(from) || isIP(from) !== isIP(to)) throw new Error("bad range")
+        list.addRange(from, to, family(from))
+      } else {
+        if (!isIP(entry)) throw new Error("bad address")
+        list.addAddress(entry, family(entry))
+      }
+    } catch {
+      bad.push(entry)
+    }
+  }
+  return { entries, bad, list }
+}
+
+/** A client socket address in plain form (`::ffff:1.2.3.4` becomes `1.2.3.4`). */
+function plainAddress(address) {
+  const text = String(address ?? "")
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(text)
+  return mapped !== null ? mapped[1] : text
+}
+
+/**
+ * Whether a client address may connect. Loopback always may: it is this
+ * machine itself, and a local HTTPS reverse proxy connects from it.
+ */
+export function addressAllowed(list, address) {
+  const ip = plainAddress(address)
+  if (ip === "::1" || ip.startsWith("127.")) return true
+  if (list === undefined) return true
+  const version = isIP(ip)
+  if (version === 0) return false
+  return list.check(ip, version === 6 ? "ipv6" : "ipv4")
+}
+
+/**
+ * The addresses a remote device can reach this listener on: every external
+ * IPv4 interface, those inside the allow list first (a VPN adapter in the
+ * allowed range is usually the one to use).
+ *
+ * @param list - the parsed allow list, or undefined for any address.
  * @returns host literals, best first; never empty.
  */
-export function reachableHosts(listenHost) {
-  if (listenHost !== "0.0.0.0" && listenHost !== "::" && listenHost !== "") return [listenHost]
+export function reachableHosts(list) {
   const hosts = []
   for (const list of Object.values(networkInterfaces())) {
     for (const item of list ?? []) {
@@ -159,7 +239,83 @@ export function reachableHosts(listenHost) {
       if (v4 && !item.internal) hosts.push(item.address)
     }
   }
-  return hosts.length > 0 ? hosts : ["127.0.0.1"]
+  if (hosts.length === 0) return ["127.0.0.1"]
+  if (list === undefined) return hosts
+  const inside = hosts.filter((host) => list.check(host, "ipv4"))
+  return [...inside, ...hosts.filter((host) => !inside.includes(host))]
+}
+
+/** A remembered-device cookie value: `<expiry>.<signature>`. */
+export function mintSession(settings, now = Date.now()) {
+  const expiry = Math.floor(now / 1000 + SESSION_TTL_SECONDS).toString(36)
+  return `${expiry}.${sessionSignature(settings, expiry)}`
+}
+
+/** Whether a cookie value is a live session for these gate settings. */
+export function verifySession(settings, value, now = Date.now()) {
+  const dot = typeof value === "string" ? value.indexOf(".") : -1
+  if (dot <= 0) return false
+  const expiry = value.slice(0, dot)
+  if (!/^[0-9a-z]{1,12}$/.test(expiry) || parseInt(expiry, 36) * 1000 <= now) return false
+  const given = Buffer.from(value.slice(dot + 1))
+  const wanted = Buffer.from(sessionSignature(settings, expiry))
+  return given.length === wanted.length && timingSafeEqual(given, wanted)
+}
+
+/**
+ * The signing key covers the gate path and the password, so changing either —
+ * or regenerating the server secret — signs every remembered device out.
+ */
+function sessionSignature(settings, expiry) {
+  const key = createHmac("sha256", settings.cookieValue).update(`rap-session\0${settings.secretPath}\0${settings.password ?? ""}`).digest()
+  return createHmac("sha256", key).update(expiry).digest("base64url")
+}
+
+/** Constant-time password comparison. */
+function passwordMatches(given, wanted) {
+  const a = createHash("sha256").update(String(given)).digest()
+  const b = createHash("sha256").update(String(wanted)).digest()
+  return timingSafeEqual(a, b)
+}
+
+const LOGIN_COPY = {
+  zh: { title: "DSH 远程访问", prompt: "输入访问密码", button: "进入", wrong: "密码不对", locked: "尝试次数太多，请几分钟后再试" },
+  en: { title: "DSH remote access", prompt: "Enter the access password", button: "Continue", wrong: "Wrong password", locked: "Too many attempts. Try again in a few minutes." },
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c])
+}
+
+/** The login page: one password field the browser can remember. */
+export function loginPage({ action, next, error, lang }) {
+  const t = LOGIN_COPY[lang] ?? LOGIN_COPY.en
+  const message = error === "wrong" ? t.wrong : error === "locked" ? t.locked : ""
+  return `<!doctype html>
+<html lang="${lang === "zh" ? "zh-CN" : "en"}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${escapeHtml(t.title)}</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:Canvas;color:CanvasText}
+form{width:min(320px,86vw);display:flex;flex-direction:column;gap:12px}
+h1{font-size:20px;font-weight:600;margin:0 0 4px}
+label{font-size:14px;opacity:.75}
+input[type=password]{font-size:17px;padding:12px;border-radius:10px;border:1px solid #8886;background:transparent;color:inherit}
+button{font-size:16px;padding:12px;border-radius:10px;border:0;background:#2563eb;color:#fff;font-weight:600}
+p{margin:0;color:#dc2626;font-size:14px}
+</style></head><body>
+<form method="post" action="${escapeHtml(action)}">
+<h1>${escapeHtml(t.title)}</h1>
+<input type="text" name="username" value="dsh" autocomplete="username" hidden>
+<label for="password">${escapeHtml(t.prompt)}</label>
+<input id="password" type="password" name="password" autocomplete="current-password" autofocus required>
+<input type="hidden" name="next" value="${escapeHtml(next)}">
+${message ? `<p role="alert">${escapeHtml(message)}</p>` : ""}
+<button type="submit">${escapeHtml(t.button)}</button>
+</form></body></html>
+`
 }
 
 /**
@@ -174,6 +330,9 @@ export function configProblem(settings) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) return { code: "bad-port", message: `listenPort must be an integer from 1 to 65535 (got ${port})` }
   if (!SECRET_PATH_PATTERN.test(settings.secretPath)) return { code: "bad-secret-path", message: "secretPath must be 4–32 letters, digits, '-' or '_'" }
   if (!COOKIE_VALUE_PATTERN.test(settings.cookieValue)) return { code: "bad-cookie", message: "cookieValue must be 8–128 letters, digits, '-' or '_'" }
+  const allow = parseAllowList(settings.allowFrom)
+  if (allow.bad.length > 0) return { code: "bad-allow", detail: allow.bad.join(", "), message: `allowFrom entries are not an IP, CIDR block or range: ${allow.bad.join(", ")}` }
+  if (typeof settings.password === "string" && settings.password.length > 256) return { code: "bad-password", message: "password must be at most 256 characters" }
   if (settings.tlsEnabled && !settings.tlsPfxPath) return { code: "tls-no-cert", message: "tlsEnabled needs tlsPfxPath (a .pfx certificate file)" }
   return undefined
 }
@@ -251,18 +410,96 @@ function writeLogLine(dir, line, maxBytes, keep) {
  * @param onUpstream401 - invoked when the upstream answers 401 to a gated
  *   request (stale DSH cookie); drop it and refresh in the background.
  */
-function buildServer(settings, log, getDshCookie, onUpstream401) {
-  const { secretPath, cookieValue, upstreamHost, upstreamPort } = settings
+function buildServer(settings, log, getDshCookie, onUpstream401, onDenied) {
+  const { secretPath, upstreamHost, upstreamPort } = settings
   const prefix = "/" + secretPath
+  const password = settings.password || ""
+  const allow = parseAllowList(settings.allowFrom).list
+  /** Failed logins per client address: timestamps inside LOGIN_WINDOW_MS. */
+  const failures = new Map()
 
+  /** Whether the request carries a live remembered-device cookie. */
   function hasGate(headers) {
     const raw = headers.cookie || ""
     for (const part of raw.split(";")) {
       const idx = part.indexOf("=")
       if (idx < 0) continue
-      if (part.slice(0, idx).trim() === GATE_COOKIE && part.slice(idx + 1).trim() === cookieValue) return true
+      if (part.slice(0, idx).trim() === GATE_COOKIE && verifySession(settings, part.slice(idx + 1).trim())) return true
     }
     return false
+  }
+
+  function sessionCookie() {
+    return `${GATE_COOKIE}=${mintSession(settings)}; Path=/; Max-Age=${SESSION_TTL_SECONDS}; HttpOnly; SameSite=Strict${settings.tlsEnabled ? "; Secure" : ""}`
+  }
+
+  /** A page load (not a fetch or an asset): the place to show the login form. */
+  function isDocument(req) {
+    const dest = req.headers["sec-fetch-dest"]
+    if (typeof dest === "string") return dest === "document"
+    return String(req.headers.accept || "").includes("text/html")
+  }
+
+  function language(req) {
+    return /^\s*zh/i.test(String(req.headers["accept-language"] || "")) ? "zh" : "en"
+  }
+
+  /** Where to go after login: only somewhere under the gate path. */
+  function safeNext(value) {
+    return typeof value === "string" && value.startsWith(prefix + "/") && !value.startsWith(prefix + "/__rap/") ? value : prefix + "/"
+  }
+
+  function recentFailures(address) {
+    const now = Date.now()
+    const list = (failures.get(address) ?? []).filter((at) => now - at < LOGIN_WINDOW_MS)
+    if (list.length > 0) failures.set(address, list)
+    else failures.delete(address)
+    return list
+  }
+
+  function sendLogin(req, res, status, next, error) {
+    res.writeHead(status, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "x-frame-options": "DENY",
+      "referrer-policy": "no-referrer",
+    })
+    res.end(req.method === "HEAD" ? undefined : loginPage({ action: prefix + LOGIN_ROUTE, next, error, lang: language(req) }))
+  }
+
+  function handleLogin(req, res) {
+    const address = plainAddress(req.socket.remoteAddress)
+    let body = ""
+    let tooBig = false
+    req.setEncoding("utf8")
+    req.on("data", (chunk) => {
+      body += chunk
+      if (body.length > 8192) {
+        tooBig = true
+        req.destroy()
+      }
+    })
+    req.on("end", () => {
+      if (tooBig) return
+      const form = new URLSearchParams(body)
+      const next = safeNext(form.get("next"))
+      if (recentFailures(address).length >= LOGIN_MAX_FAILURES) {
+        log(`LOGIN-LOCKED ${address}`)
+        sendLogin(req, res, 429, next, "locked")
+        return
+      }
+      if (password !== "" && passwordMatches(form.get("password") ?? "", password)) {
+        failures.delete(address)
+        log(`LOGIN ${address}`)
+        res.writeHead(303, { location: next, "set-cookie": sessionCookie(), "cache-control": "no-store" })
+        res.end()
+        return
+      }
+      failures.set(address, [...recentFailures(address), Date.now()])
+      log(`LOGIN-FAIL ${address}`)
+      // A short pause makes guessing slow without bothering a person.
+      setTimeout(() => sendLogin(req, res, 401, next, "wrong"), 400)
+    })
   }
 
   function routePath(pathname) {
@@ -304,7 +541,7 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
     return kept.length > 0 ? path + lead + kept.join("&") : path
   }
 
-  async function forward(req, res, path, search, setGate) {
+  async function forward(req, res, path, search, gated, setGate) {
     const cookie = await getDshCookie()
     const upstreamReq = http.request(
       {
@@ -317,8 +554,7 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
       (upRes) => {
         if (upRes.statusCode === 401) onUpstream401?.()
         const outHeaders = { ...upRes.headers }
-        if (setGate) {
-          outHeaders["set-cookie"] = `${GATE_COOKIE}=${cookieValue}; Path=/; HttpOnly; SameSite=Strict${settings.tlsEnabled ? "; Secure" : ""}`
+        if (gated) {
           // Defensive: today the token is always stripped, so DSH never redirects
           // on the gate path; should it ever answer a root-relative Location,
           // re-enter through the gate instead of the ungated origin root.
@@ -326,6 +562,8 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
             outHeaders.location = prefix + outHeaders.location
           }
         }
+        // Each page load renews the remembered device for another 30 days.
+        if (setGate) outHeaders["set-cookie"] = sessionCookie()
         res.writeHead(upRes.statusCode || 502, outHeaders)
         upRes.pipe(res)
       },
@@ -351,13 +589,31 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
       res.end()
       return
     }
-    if (path !== undefined) {
-      log(`ENTRY ${req.method} ${req.url}`)
-      return forward(req, res, path, url.search, true)
+    if (path === LOGIN_ROUTE && req.method === "POST") return handleLogin(req, res)
+    if (path === LOGOUT_ROUTE) {
+      log(`LOGOUT ${plainAddress(req.socket.remoteAddress)}`)
+      res.writeHead(303, { location: prefix + "/", "set-cookie": `${GATE_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict`, "cache-control": "no-store" })
+      res.end()
+      return
     }
-    if (hasGate(req.headers)) {
+    const authed = hasGate(req.headers)
+    if (path !== undefined) {
+      if (password === "" || authed) {
+        log(`ENTRY ${req.method} ${req.url}`)
+        return forward(req, res, path, url.search, true, isDocument(req) || !authed)
+      }
+      if ((req.method === "GET" || req.method === "HEAD") && isDocument(req)) {
+        log(`LOGIN-PAGE ${req.method} ${req.url}`)
+        return sendLogin(req, res, 200, safeNext(url.pathname + url.search))
+      }
+      log(`UNAUTH ${req.method} ${req.url}`)
+      res.writeHead(401, { "content-type": "text/plain" })
+      res.end("sign in first\n")
+      return
+    }
+    if (authed) {
       log(`PASS ${req.method} ${req.url}`)
-      return forward(req, res, url.pathname, url.search, false)
+      return forward(req, res, url.pathname, url.search, false, false)
     }
     log(`DENY ${req.method} ${req.url}`)
     res.writeHead(403, { "content-type": "text/plain" })
@@ -367,7 +623,8 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
   const handleUpgrade = async (req, socket, head) => {
     const url = new URL(req.url, "http://" + (req.headers.host || "local"))
     const path = routePath(url.pathname)
-    const allowed = path !== undefined || hasGate(req.headers)
+    const authed = hasGate(req.headers)
+    const allowed = authed || (path !== undefined && password === "")
     if (!allowed) {
       socket.write("HTTP/1.1 403 Forbidden\r\n\r\n")
       socket.destroy()
@@ -421,6 +678,15 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
     server = http.createServer(handler)
   }
   server.on("upgrade", handleUpgrade)
+  // The allow list acts like a firewall: a client outside it is dropped before
+  // any byte (or TLS handshake) is exchanged, so a scan learns nothing.
+  server.on("connection", (socket) => {
+    if (addressAllowed(allow, socket.remoteAddress)) return
+    const address = plainAddress(socket.remoteAddress)
+    log(`DENY-ADDRESS ${address}`)
+    onDenied?.(address)
+    socket.destroy()
+  })
 
   return { server }
 }
@@ -441,6 +707,8 @@ export function apply(ctx, config) {
    * why. `state` is one of starting | listening | disabled | error.
    */
   let status = { state: "starting" }
+  /** The last client address the allow list turned away, for the page. */
+  let lastDenied = undefined
 
   // This plugin ships its own page for its row; tell the settings service not to
   // offer a generated one. Optional: a deployment without settings still runs.
@@ -457,8 +725,8 @@ export function apply(ctx, config) {
   }
 
   /** Record a failure the page should show, and say it on the DSH console too. */
-  function fail(message, code = "error") {
-    status = { state: "error", code, error: message }
+  function fail(message, code = "error", detail) {
+    status = { state: "error", code, error: message, ...(detail !== undefined ? { detail } : {}) }
     log(message)
     ctx.logger?.warn?.("remote-access-proxy: %s", message)
   }
@@ -470,11 +738,14 @@ export function apply(ctx, config) {
     if (settings !== undefined) {
       const scheme = settings.tlsEnabled ? "https" : "http"
       doc.scheme = scheme
-      doc.listenHost = settings.listenHost
+      const allow = parseAllowList(settings.allowFrom)
       doc.listenPort = settings.listenPort
       doc.upstream = `${settings.upstreamHost}:${settings.upstreamPort}`
       doc.tls = settings.tlsEnabled === true
-      doc.urls = reachableHosts(settings.listenHost).map((host) => `${scheme}://${host.includes(":") ? `[${host}]` : host}:${settings.listenPort}/${settings.secretPath}/`)
+      doc.password = typeof settings.password === "string" && settings.password !== ""
+      doc.allowFrom = allow.bad.length === 0 ? allow.entries : []
+      if (lastDenied !== undefined) doc.lastDenied = lastDenied
+      doc.urls = reachableHosts(allow.bad.length === 0 ? allow.list : undefined).map((host) => `${scheme}://${host.includes(":") ? `[${host}]` : host}:${settings.listenPort}/${settings.secretPath}/`)
     }
     return doc
   }
@@ -720,10 +991,13 @@ export function apply(ctx, config) {
     }
     const problem = configProblem(resolved)
     if (problem !== undefined) {
-      fail(`not started: ${problem.message}`, problem.code)
+      fail(`not started: ${problem.message}`, problem.code, problem.detail)
       return
     }
-    const built = buildServer(resolved, log, getDshCookie, onUpstream401)
+    lastDenied = undefined
+    const built = buildServer(resolved, log, getDshCookie, onUpstream401, (address) => {
+      lastDenied = { address, at: new Date().toISOString() }
+    })
     if (built.error !== undefined) {
       fail(built.error, built.code)
       return
@@ -733,22 +1007,29 @@ export function apply(ctx, config) {
     status = { state: "starting" }
     own.on("error", (err) => {
       if (server !== own) return
-      const code = { EADDRINUSE: "port-in-use", EADDRNOTAVAIL: "bad-address", EACCES: "port-denied" }[err.code] ?? "listen-error"
+      // A machine with IPv6 turned off cannot bind "::"; every-interface IPv4 then.
+      if (bindHost === "::" && (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL")) {
+        bindHost = "0.0.0.0"
+        own.listen(resolved.listenPort, bindHost, onListening)
+        return
+      }
+      const code = { EADDRINUSE: "port-in-use", EACCES: "port-denied" }[err.code] ?? "listen-error"
       const reason = err.code === "EADDRINUSE"
-        ? `port ${resolved.listenPort} is already in use on ${resolved.listenHost} (another program, or a second DSH app sharing this profile)`
-        : err.code === "EADDRNOTAVAIL"
-          ? `${resolved.listenHost} is not an address of this machine`
-          : err.code === "EACCES"
-            ? `no permission to listen on port ${resolved.listenPort}`
-            : `listener error ${err.code || err.message}`
+        ? `port ${resolved.listenPort} is already in use (another program, or a second DSH app sharing this profile)`
+        : err.code === "EACCES"
+          ? `no permission to listen on port ${resolved.listenPort}`
+          : `listener error ${err.code || err.message}`
       fail(reason, code)
       server = undefined
     })
-    own.listen(resolved.listenPort, resolved.listenHost, () => {
+    // Every interface, IPv6 and IPv4 alike; who may connect is the allow list's job.
+    let bindHost = "::"
+    const onListening = () => {
       if (server !== own) return
       status = { state: "listening" }
-      log(`listening on ${resolved.listenHost}:${resolved.listenPort} secret=/${resolved.secretPath}`)
-    })
+      log(`listening on ${bindHost === "::" ? "[::]" : bindHost}:${resolved.listenPort} secret=/${resolved.secretPath} password=${resolved.password ? "on" : "off"} allow=${resolved.allowFrom || "any"}`)
+    }
+    own.listen(resolved.listenPort, bindHost, onListening)
     // Warm the DSH session cookie so the first remote request is fast.
     void getDshCookie()
   }

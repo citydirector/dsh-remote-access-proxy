@@ -13,19 +13,21 @@
 # value and then the schema default. Rows are addressed by id, so this user
 # layer overrides the bundle's row wholesale for the keys it states.
 #
-# `secretPath` / `cookieValue` are generated and written back on first start
+# `secretPath` and the internal `cookieValue` signing secret are generated and written back on first start
 # when left empty; there is no need to fill them in.
 
 - id: remote-access-proxy
   config:
     enabled: true
-    # 监听地址：0.0.0.0 = 全部网卡（VPN/反代/局域网均可到达）；或填本机网卡具体 IP
-    listenHost: 0.0.0.0
+    # 端口；代理固定监听本机所有网卡（IPv4 + IPv6）
     listenPort: 40443
+    # 允许连接的客户端地址：IP、网段（CIDR）或 a-b 范围，逗号/空格分隔；
+    # 留空 = 不限制。本机回环始终允许。
+    allowFrom: 192.168.0.0/16, 100.64.0.0/10
+    # 可选访问密码；留空 = 只靠随机路径
+    password: ""
     # 随机门禁路径（4–32 位字母数字、连字符或下划线；留空自动生成）
     secretPath: CHANGE_ME_RANDOM_PATH
-    # 门禁 HttpOnly Cookie 值（至少 8 位；留空自动生成；改后旧 Cookie 立即失效）
-    cookieValue: CHANGE_ME_COOKIE_VALUE
     # 上游 DSH 本体。留空 / 0 = 自动跟随当前实例（启动时读运行中的 webStartup
     # 地址：dsh web 为 3080，桌面端启动器固定 19387）；显式值优先。
     upstreamHost: ""

@@ -21,7 +21,7 @@ import http from "node:http"
 import { randomBytes } from "node:crypto"
 import { dirname, join } from "node:path"
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { networkInterfaces, tmpdir } from "node:os"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import vm from "node:vm"
 
@@ -271,9 +271,9 @@ function createCtx(initial, connection, { webStartup, documentPath } = {}) {
   return ctx
 }
 
-function httpReq(port, { method = "GET", path = "/", headers = {}, body } = {}) {
+function httpReq(port, { method = "GET", path = "/", headers = {}, body, hostname = "127.0.0.1" } = {}) {
   return new Promise((resolve, reject) => {
-    const req = http.request({ hostname: "127.0.0.1", port, method, path, headers }, (res) => {
+    const req = http.request({ hostname, port, method, path, headers }, (res) => {
       let data = ""
       res.on("data", (c) => (data += c))
       res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, body: data }))
@@ -348,7 +348,8 @@ async function main() {
   const ctx2 = createCtx(
     {
       enabled: true,
-      listenHost: "127.0.0.1",
+      allowFrom: "",
+      password: "",
       listenPort: proxyPort,
       secretPath: "",
       cookieValue: "",
@@ -387,13 +388,18 @@ async function main() {
   ctx2._commit(writeBack)
   await sleep(150)
 
-  const GATE = `dsh_et_gate=${generatedCookie}`
-
   // 1) ENTRY without any cookie -> 200 index + gate cookie set, DSH session warmed.
   let r = await httpReq(proxyPort, { path: `/${generatedPath}/` })
   check("entry through the generated path -> 200 index", r.status === 200 && r.body.includes("index ok"), `got ${r.status} ${r.body}`)
-  check("entry sets the gate cookie", Array.isArray(r.headers["set-cookie"]) && r.headers["set-cookie"][0].startsWith(`dsh_et_gate=${generatedCookie}`))
-  check("entry serves the DSH index via the proxy-held cookie", r.status === 200)
+  const minted = Array.isArray(r.headers["set-cookie"]) ? r.headers["set-cookie"][0] : ""
+  check(
+    "entry remembers the device with a signed 30-day cookie, not the raw secret",
+    /^dsh_et_gate=[0-9a-z]+\.[A-Za-z0-9_-]{43};/.test(minted) && minted.includes("Max-Age=2592000") && minted.includes("HttpOnly") && !minted.includes(generatedCookie),
+    minted,
+  )
+  const GATE = minted.split(";")[0]
+  r = await httpReq(proxyPort, { path: "/api/session/me", headers: { cookie: `dsh_et_gate=${generatedCookie}` } })
+  check("the raw server secret is not a valid cookie", r.status === 403, `got ${r.status}`)
 
   // 1b) the gate path without its trailing slash redirects into it, so the
   //     client's `<base href="./">` assets stay under the gate.
@@ -405,7 +411,7 @@ async function main() {
   check("status route is registered on the authenticated /api channel", status !== undefined && plugin.STATUS_ROUTE === "/api/remote-access-proxy/status")
   check(
     "status reports listening with the entry address",
-    status?.state === "listening" && Array.isArray(status.urls) && status.urls.includes(`http://127.0.0.1:${proxyPort}/${generatedPath}/`),
+    status?.state === "listening" && Array.isArray(status.urls) && status.urls.length > 0 && status.urls.every((url) => url.startsWith("http://") && url.endsWith(`:${proxyPort}/${generatedPath}/`)),
     JSON.stringify(status),
   )
 
@@ -544,7 +550,8 @@ async function main() {
   const ctx3 = createCtx(
     {
       enabled: true,
-      listenHost: "127.0.0.1",
+      allowFrom: "",
+      password: "",
       listenPort: autoPort,
       secretPath: "",
       cookieValue: "",
@@ -581,7 +588,8 @@ async function main() {
   const ctx4 = createCtx(
     {
       enabled: true,
-      listenHost: "127.0.0.1",
+      allowFrom: "",
+      password: "",
       listenPort: explicitPort,
       secretPath: "",
       cookieValue: "",
@@ -627,6 +635,7 @@ async function main() {
 
   ctx2._disposeAll()
   mock.server.close()
+  const pwMock = await createMockDsh()
 
   // ---- the 0.1.7 host contract ------------------------------------------------
 
@@ -650,11 +659,11 @@ async function main() {
   const defaults = plugin.Config({})
   check(
     "Config parses into live references carrying their schema defaults",
-    typeof defaults.listenHost?.get === "function" && defaults.listenHost.get() === "0.0.0.0"
+    typeof defaults.allowFrom?.get === "function" && defaults.allowFrom.get() === "" && defaults.password.get() === "" && defaults.listenHost === undefined
       && typeof defaults.enabled?.get === "function" && defaults.enabled.get() === true
       && defaults.logMaxBytes.get() === 1048576
       && defaults.upstreamHost.get() === "" && defaults.upstreamPort.get() === 0,
-    JSON.stringify({ listenHost: defaults.listenHost?.get?.(), logMaxBytes: defaults.logMaxBytes?.get?.(), upstreamPort: defaults.upstreamPort?.get?.() }),
+    JSON.stringify({ allowFrom: defaults.allowFrom?.get?.(), logMaxBytes: defaults.logMaxBytes?.get?.(), upstreamPort: defaults.upstreamPort?.get?.() }),
   )
   let serializes = true
   try {
@@ -664,6 +673,89 @@ async function main() {
     serializes = false
   }
   check("Config serializes for the settings form projection", serializes)
+
+  // ---- 1.3: access password, allow list -------------------------------------
+  const pwPort = await freePort()
+  const pwCtx = createCtx(
+    { ...ctx2._state, enabled: true, listenPort: pwPort, secretPath: "pwgate1234", cookieValue: "pwsecret12345", password: "open sesame", upstreamHost: "127.0.0.1", upstreamPort: pwMock.port },
+    connection,
+  )
+  plugin.apply(pwCtx, pwCtx._refs)
+  await sleep(150)
+  const html = { accept: "text/html", "accept-language": "zh-CN,zh;q=0.9" }
+  r = await httpReq(pwPort, { path: "/pwgate1234/", headers: html })
+  check("with a password the entry shows the login page", r.status === 200 && r.body.includes('type="password"') && r.body.includes("输入访问密码") && !r.body.includes("index ok"), `got ${r.status}`)
+  check("the login page sets no cookie", r.headers["set-cookie"] === undefined)
+  r = await httpReq(pwPort, { path: "/pwgate1234/api/session/me" })
+  check("an API call before login is 401", r.status === 401, `got ${r.status}`)
+  r = await httpReq(pwPort, { path: "/pwgate1234/session/abc", headers: html })
+  check("a deep link keeps where it was going", r.body.includes('name="next" value="/pwgate1234/session/abc"'))
+  const form = (pw, next = "/pwgate1234/session/abc") => new URLSearchParams({ username: "dsh", password: pw, next }).toString()
+  const post = (body, address) => httpReq(pwPort, { method: "POST", path: "/pwgate1234/__rap/login", headers: { "content-type": "application/x-www-form-urlencoded", ...html }, body })
+  r = await post(form("wrong"))
+  check("a wrong password is refused on the login page", r.status === 401 && r.body.includes("密码不对") && r.headers["set-cookie"] === undefined, `got ${r.status}`)
+  r = await post(form("open sesame"))
+  const pwCookie = Array.isArray(r.headers["set-cookie"]) ? r.headers["set-cookie"][0].split(";")[0] : ""
+  check("the right password signs in and returns to the deep link", r.status === 303 && r.headers.location === "/pwgate1234/session/abc" && pwCookie.startsWith("dsh_et_gate="), `got ${r.status} ${r.headers.location}`)
+  r = await post(form("open sesame", "https://evil.example/"))
+  check("login never redirects off the gate path", r.headers.location === "/pwgate1234/", `loc=${r.headers.location}`)
+  r = await httpReq(pwPort, { path: "/pwgate1234/", headers: { ...html, cookie: pwCookie } })
+  check("a signed-in device opens DSH", r.status === 200 && r.body.includes("index ok"), `got ${r.status}`)
+  r = await httpReq(pwPort, { path: "/api/session/me", headers: { cookie: pwCookie } })
+  check("a signed-in device passes outside the path too", r.status === 200, `got ${r.status}`)
+  const pwWs = await new Promise((resolve) => {
+    const req = http.request({ hostname: "127.0.0.1", port: pwPort, path: "/pwgate1234/ws", headers: { connection: "Upgrade", upgrade: "websocket" } })
+    req.on("upgrade", (res, socket) => { socket.destroy(); resolve(res.statusCode) })
+    req.on("response", (res) => resolve(res.statusCode))
+    req.on("error", () => resolve("error"))
+    req.end()
+  })
+  check("a websocket without login is refused even on the gate path", pwWs === 403, `got ${pwWs}`)
+  r = await httpReq(pwPort, { path: "/pwgate1234/__rap/logout", headers: { cookie: pwCookie } })
+  check("logout clears the cookie", r.status === 303 && String(r.headers["set-cookie"]).includes("Max-Age=0"), `got ${r.status}`)
+  pwCtx._commit({ password: "new password" })
+  await sleep(150)
+  r = await httpReq(pwPort, { path: "/api/session/me", headers: { cookie: pwCookie } })
+  check("changing the password signs every device out", r.status === 403, `got ${r.status}`)
+  for (let i = 0; i < 5; i += 1) await post(form("guess" + i))
+  r = await post(form("new password"))
+  check("too many wrong passwords lock the address for a while", r.status === 429 && r.body.includes("尝试次数太多"), `got ${r.status}`)
+  status = await readStatus()
+  check("status says a password is set", status?.password === true, JSON.stringify(status))
+
+  // Allow list: loopback always passes; an outside address is dropped.
+  const external = Object.values(networkInterfaces()).flat().find((item) => item && (item.family === "IPv4" || item.family === 4) && !item.internal)?.address
+  pwCtx._commit({ password: "", allowFrom: "203.0.113.0/24" })
+  await sleep(150)
+  r = await httpReq(pwPort, { path: "/pwgate1234/" })
+  check("loopback is always allowed", r.status === 200, `got ${r.status}`)
+  if (external !== undefined) {
+    r = await httpReq(pwPort, { path: "/pwgate1234/", hostname: external }).catch((error) => ({ status: error.code }))
+    check("an address outside the allow list is dropped", r.status === "ECONNRESET" || r.status === "EPIPE", `got ${r.status} from ${external}`)
+    status = await readStatus()
+    check("the page learns which address was turned away", status?.lastDenied?.address === external, JSON.stringify(status?.lastDenied))
+    pwCtx._commit({ allowFrom: `203.0.113.0/24, ${external}` })
+    await sleep(150)
+    r = await httpReq(pwPort, { path: "/pwgate1234/", hostname: external })
+    check("adding the address lets it in (and the listener covers every interface)", r.status === 200, `got ${r.status}`)
+  }
+  pwCtx._commit({ allowFrom: "192.168.1.0/24, not-an-ip" })
+  await sleep(100)
+  status = await readStatus()
+  check("a bad allow-list entry is refused with a reason", status?.state === "error" && status.code === "bad-allow" && status.detail === "not-an-ip", JSON.stringify(status))
+  const parsed = plugin.parseAllowList("10.0.0.0/8 192.168.1.10-192.168.1.20; fd00::/8,1.2.3.4")
+  check(
+    "allow list understands IPs, CIDR blocks, ranges and IPv4-mapped clients",
+    parsed.bad.length === 0
+      && plugin.addressAllowed(parsed.list, "::ffff:10.9.8.7")
+      && plugin.addressAllowed(parsed.list, "192.168.1.15")
+      && !plugin.addressAllowed(parsed.list, "192.168.1.21")
+      && plugin.addressAllowed(parsed.list, "fd12::3")
+      && !plugin.addressAllowed(parsed.list, "8.8.8.8")
+      && plugin.addressAllowed(plugin.parseAllowList("").list, "8.8.8.8"),
+  )
+  pwCtx._disposeAll()
+  pwMock.server.close()
 
   check("generated values are written exactly once", ctx2._writes.length === 1, `writes=${ctx2._writes.length}`)
 

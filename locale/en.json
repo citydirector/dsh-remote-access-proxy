@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Remote Access Proxy",
-    "description": "Use DSH from your phone or another computer: a random-path + HttpOnly-cookie gate in front of the Web GUI, bridged to DSH's per-start launch token."
+    "description": "Use DSH from your phone or another computer: a secret-path entry with an optional password and client allow list, bridged to DSH's per-start launch token."
   }
 }
