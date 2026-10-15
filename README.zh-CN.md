@@ -2,183 +2,134 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-DSH（DeepSeek Harness）Web 界面的远程访问代理，以 **DSH profile bundle** 形式分发：
-内嵌反向代理，把 Web GUI 与其 `/api` 安全地暴露给任意远程前置（easytier、ZeroTier、
-Tailscale、nginx、Caddy、Cloudflare Tunnel 或普通局域网 IP），自动桥接新版 DSH 的
-进程级启动 token 认证，并向插件面板贡献自己的配置页。
+在手机、平板或另一台电脑上用浏览器使用 DSH（DeepSeek Harness）。
 
-面向 **DSH 0.1.7-rc.1 及以上**（profile 持有配置的新模型）。该要求写在
-`peerDependencies` 里，因此在更旧的 harness 上安装会被明确拒绝，而不是加载到一半报错。
+插件在 DSH 里起一个小型反向代理：远程设备只要打开一个带随机路径的地址，就能用完整的 Web GUI，不用知道 DSH 每次启动都会变的 launch token。前面接什么都行：局域网 IP、easytier、ZeroTier、Tailscale、nginx、Caddy、Cloudflare Tunnel。
 
-## 安装
+需要 **DSH 0.1.7-rc.1 或更新**（已在 0.2.0-rc.2 上实测）。
 
-本仓库**本身就是一个 bundle 包**，插件页可直接用 GitHub URL 安装。
+## 三步用起来
 
-### 从插件页安装（推荐）
+1. **安装**：侧边栏 **插件** → 添加插件，填入
+   ```
+   https://github.com/citydirector/dsh-remote-access-proxy
+   ```
+   装完打开开关。
+2. **拿地址**：在插件列表打开 **远程访问代理**，再点它下面的 **远程访问代理** 组件。页面顶部显示运行状态和**入口地址**，点 **复制**。
+3. **在远程设备上打开**：在同一网络的设备上用浏览器打开这个地址，例如 `http://192.168.1.20:13337/k3x9q2m7p1zt/`。第一次打开会写入门禁 Cookie，之后整个站点都能用。
 
-打开侧边栏**插件**面板 → 安装，填入仓库地址：
+默认什么都不用配：端口 13337、监听所有网卡、随机路径和 Cookie 首次启动自动生成并保存。
 
+> **先在本机配好 API Key。** DSH 不允许远程页面修改设置（这是 DSH 自己的安全规则，不是插件限制），所以 API Key、模型等设置要在本机的 DSH 里填。远程页面可以正常新建会话、聊天、选择工作区。
+
+## 配置页
+
+![配置页](docs/config-page.png)
+
+- **状态**：运行中 / 已关闭 / 未能启动。启动失败会直接写出原因和改法，例如「端口 13337 已被占用」「证书读不出来」，不用再去翻日志。
+- **入口地址**：每块网卡一行，附复制按钮。
+- **门禁**：一键「重新生成路径与 Cookie」。保存后旧地址和所有已登录设备立即失效，适合怀疑地址泄露的时候用。
+- 开关类设置显示为开关；保存后立即生效，代理原地重启，不用重启 DSH。
+
+配置页只在本机页面出现；远程页面看不到，这一点同样由 DSH 决定。
+
+## 要不要开 TLS
+
+不是必须的。DSH 0.2 在明文 http 下也能正常工作。
+
+- **VPN / 家庭局域网**：用 http 就行，流量本身已经在私有网络里。
+- **公网**：请开 TLS，或者把代理放在 HTTPS 反代（Caddy、nginx、Cloudflare Tunnel）后面。
+
+开 TLS 需要一个 `.pfx` 证书。Windows 上用 PowerShell 生成自签证书：
+
+```powershell
+$cert = New-SelfSignedCertificate -DnsName "dsh.local" -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(5)
+Export-PfxCertificate -Cert $cert -FilePath .\data\certs\dsh-proxy.pfx -Password (ConvertTo-SecureString "换成你的口令" -AsPlainText -Force)
 ```
-https://github.com/citydirector/dsh-remote-access-proxy
-```
 
-管理器会对该 URL 执行 pnpm、读取 `dsh.bundle.patch`，把本 bundle 的行加入 profile
-的用户层。启用后，打开该 bundle 的页面，进入 **`remote-access-proxy`** 行，用它的
-配置页编辑即可。
-
-### 用 profile CLI
+macOS / Linux 用 openssl：
 
 ```bash
-dsh plugin --profile web add github:citydirector/dsh-remote-access-proxy
+openssl req -x509 -newkey rsa:2048 -nodes -days 1825 -subj "/CN=dsh.local" -keyout key.pem -out cert.pem
+openssl pkcs12 -export -inkey key.pem -in cert.pem -out dsh-proxy.pfx -passout pass:换成你的口令
 ```
 
-git 依赖的 commit 由 profile 的 `pnpm-lock.yaml` 钉住，普通 `pnpm install` 不会移动它。
-要前移到新版本，就在 profile 目录里用同样的 spec 重跑 `pnpm add`，再把该 bundle 关→开；
-这也正是让 `node_modules`、`.modules.yaml`、`pnpm-lock.yaml` 三者重新一致的做法。
+然后在配置页打开「启用 TLS」，填证书路径和口令，保存。浏览器第一次访问时需要接受一次证书警告。开启 TLS 后门禁 Cookie 会带上 `Secure` 标记。
 
-### 手动安装
+## 常见问题
 
-把 `plugin/`、`ui/`、`locale/`、`icon.svg` 拷入 profile，自行插入两行：
+| 配置页显示 | 怎么办 |
+|---|---|
+| 端口 … 已被占用 | 换个端口，或关掉占用它的程序。两个 DSH（例如便携版和桌面版）共用同一个 `data` 目录时也会这样，见下文 |
+| … 不是本机的地址 | 监听地址填 `0.0.0.0`，或本机某块网卡的 IP（不要填网段） |
+| 证书读不出来 | 检查证书路径（相对路径相对 DSH 的工作目录）和口令 |
+| 读不到代理状态 | 插件没在运行：确认插件和组件的开关都是开的 |
 
-```yaml
-# data/profiles/web/cordis.patch.yml
-- insert:
-    - id: remote-access-proxy
-      name: ./plugin/dsh-remote-access-proxy.mjs
-    - id: remote-access-proxy-ui
-      name: ./ui/lib/index.js
-```
-
-宿主行的 id 是关键：0.1.7+ 里，插件的设置命名空间**就是**它的 profile entry id。
-另外手动安装没有 bundle 条目，插件页不会有配置页入口——直接改 profile patch 即可。
-
-共用同一个 `$DSH_HOME` 的两个 DSH app（便携版与桌面端指向同一个 `data` 目录）会解析同一份
-profile patch，因此都会尝试绑定同一个 `listenPort`。用 `enabled: false`（或行级 `disabled: true`）
-关掉其中一个，或者给两边配不同的 `listenPort`。
-
-## 目录结构
-
-```
-dsh-remote-access-proxy/
-├── package.json                      # bundle 清单：dsh.bundle.patch、icon、engines/peers
-├── cordis.patch.yml                  # 本 bundle 插入的两行
-├── plugin/
-│   └── dsh-remote-access-proxy.mjs   # 宿主层网关（门禁 + 转发服务器）
-├── ui/                               # 配置页（双面包）
-│   ├── package.json                  # dsh.client 声明 + exports["./client"]
-│   └── lib/{index.js,client.js}      # 宿主半（行锚点）+ 浏览器半（配置页）
-├── config/cordis.patch.example.yml   # 脱敏的 profile patch 模板
-├── locale/{en,zh}.json               # 插件页标题/描述词典
-├── icon.svg                          # 插件页图标
-├── test-remote-access-proxy.mjs      # mock DSH 端到端测试（31 项）
-└── README.md / README.zh-CN.md
-```
-
-`access.log`（以及轮转出来的 `.1`…）是运行产物，永不入库。
-
-## 为什么需要它
-
-新版 DSH 对浏览器会话引入两级认证：
-
-1. **Host/Origin 信任栅栏** —— `/api` 只接受回环 Host 或显式 `trustedHosts`，且 Origin 需同源；
-2. **浏览器会话认证** —— 每次进程启动生成随机 `launchToken`
-   （`http://127.0.0.1:3080/?token=…`）；无 `dsh-auth-*` 签名 Cookie 的 `/api` 一律 401。
-
-本代理把请求以回环身份（Host 改写为 `127.0.0.1:3080`、剥离 Origin）转发给 DSH，
-并**自行执行 token 交换、持有 `dsh-auth-*` Cookie**。远程用户只需要随机路径 +
-HttpOnly Cookie 门禁，**永远看不到每次启动的 launchToken**。
+- **远程打开显示 `forbidden`**：地址的随机路径不对，或者 Cookie 被清了。重新从完整的入口地址进入。
+- **两个 DSH 共用一个 `$DSH_HOME`**：它们读同一份 profile，会抢同一个端口。在其中一个的配置页关掉「启用」，或者给两边设不同的端口。
 
 ## 安全模型
 
 访问控制完全由代理的门禁承担：
 
-- **随机路径** —— 入口是 `https://<IP>:<端口>/<secretPath>/`；
-- **HttpOnly Cookie** —— 首次通过入口签发 `dsh_et_gate`
-  （`Path=/; HttpOnly; SameSite=Strict`），之后整个 origin 放行。
+- **随机路径**：入口是 `<地址>:<端口>/<随机路径>/`，随机路径用系统 CSPRNG 生成；
+- **HttpOnly Cookie**：第一次从入口进入时写入 `dsh_et_gate`（`Path=/; HttpOnly; SameSite=Strict`，开 TLS 时再加 `Secure`），之后整个站点放行；没有 Cookie 的请求一律 403。
 
-建议开启 TLS（`tlsEnabled: true`）——`crypto.randomUUID` 需要安全上下文，明文 HTTP
-会让 Web 客户端失效。证书加载失败会拒绝启动（fail-loud，不降级明文）。
+代理以回环身份转发给 DSH（Host 改写为 `127.0.0.1:<端口>`，去掉 Origin），并**自己完成 launch token 交换、持有 `dsh-auth-*` Cookie**，所以远程用户永远看不到每次启动都会变的 token。DSH 返回 401 时，代理丢弃旧 Cookie 并重新交换。
 
-## 配置
+随机路径就是钥匙：把入口地址当密码对待。`access.log` 的启动行也会记录它。
 
-每个字段都是插件自己 Cordis `Config` 里的 `.volatile()` 字段，因此取值存放在活动 profile
-的 `cordis.patch.yml` 中——可以在 `remote-access-proxy` 行的配置页里改（插件面板），
-也可以把 [`config/cordis.patch.example.yml`](config/cordis.patch.example.yml) 手工并进
-profile patch。`secretPath` / `cookieValue` 留空时首次启动自动生成并回写。
+## 配置项
 
-保存即写入 profile patch 并立即生效：插件**不会**被重新挂载，只是内嵌服务器带着新值重启。
+所有字段都是插件 Cordis `Config` 的 `.volatile()` 字段，保存在当前 profile 的 `cordis.patch.yml` 里。可以在配置页修改，也可以参照 [`config/cordis.patch.example.yml`](config/cordis.patch.example.yml) 手动编辑。
 
 | 字段 | 说明 |
 |---|---|
 | `enabled` | 关闭后停止监听 |
-| `listenHost` | 监听地址（`0.0.0.0` = 全接口） |
-| `listenPort` | 监听端口（默认 `13337`）|
-| `secretPath` | 随机门禁路径（4–32 位） |
-| `cookieValue` | 门禁 HttpOnly Cookie 值 |
-| `upstreamHost` / `upstreamPort` | 上游 DSH。留空（`""` / `0`）时自动跟随当前实例（见下） |
-| `tlsEnabled` / `tlsPfxPath` / `tlsPassphrase` | 自签 TLS（pfx） |
-| `logMaxBytes` / `logKeep` | `access.log` 轮转：写入将超过此大小就先轮转（默认 `1048576` = 1 MiB），保留这么多份旧文件（默认 `3`）。`logMaxBytes: 0` = 不轮转；`logKeep: 0` = 不留历史 |
+| `listenHost` | 监听地址（`0.0.0.0` = 所有网卡） |
+| `listenPort` | 监听端口（默认 `13337`） |
+| `secretPath` | 随机路径（4–32 位字母、数字、`-`、`_`；留空自动生成） |
+| `cookieValue` | 门禁 Cookie 值（8 位以上字母、数字、`-`、`_`；留空自动生成） |
+| `upstreamHost` / `upstreamPort` | 上游 DSH。留空 / `0` 时自动读取当前实例的地址：`dsh web` 默认 3080，桌面端固定 19387 |
+| `tlsEnabled` / `tlsPfxPath` / `tlsPassphrase` | TLS（pfx 证书） |
+| `logMaxBytes` / `logKeep` | `access.log` 轮转：超过上限（默认 1 MiB）就轮转，保留若干份旧文件（默认 3）；`0` 分别表示不轮转、不留历史 |
 
-入口：`https://<IP>:<端口>/<secretPath>/`（每设备接受一次自签证书警告）。
+## 从 1.1 升级
 
-### 上游地址
+升级后直接用，不用做任何事：
 
-`upstreamHost` / `upstreamPort` 指向本代理转发的 DSH 实例。留空时在启动时从所在进程实时
-发布的 `webStartup` 服务读取地址——`dsh web` 的 `--port`（默认 `3080`），或桌面端启动器
-固定写死的 `--port 19387`——因此不需要按实例配置。显式填写的值始终优先；读不到 Web 服务
-时退回历史上的 `127.0.0.1:3080`。解析结果会写进日志（`upstream 127.0.0.1:19387 (auto)`）。
+- 1.1 把组件写成相对路径，DSH 首次保存配置时会把它展开成**绝对路径**写进 profile。便携版换了目录之后，插件就加载不了了。
+- 1.2 改为按包名加载。首次启动时插件会把 profile 里这条旧的绝对路径改写成包名，**原来的随机路径和 Cookie 保持不变**，已经收藏的地址继续可用。
+- 原来的两个组件（代理 + 配置页）合并成了一个，插件页显示的是正常的标题和图标，而不是一长串 `file:///…` 路径。
 
-## 日志轮转
+### 从 0.3.0 迁移
 
-每次经过门禁的请求（`ENTRY` / `PASS` / `DENY`）、监听变化与 DSH 401 自愈都会追加到插件
-旁边的 `access.log`（在 profile 的 `node_modules` 里）。放着不管它会无限增长，所以改成按大小轮转：
+DSH 0.1.7 移除了 `settings.yaml`。先升级 DSH，再更新插件并重新打开开关。首次启动时，DSH 会把 `data/settings.yaml` 里 `remote-access-proxy:` 这一节导入 profile，并把原文件改名为 `settings.yaml.imported`。
 
-- 某行写入会把文件顶过 `logMaxBytes`（默认 1 MiB）时，先轮转再写；
-- 写满的文件变成 `access.log.1`，更旧的顺移到 `access.log.2`……超过 `logKeep`（默认 `3`）的直接删除；
-- 因此活动的 `access.log` 始终在阈值以内，整个环上限是 `logMaxBytes × (logKeep + 1)`。
-
-`logMaxBytes: 0` 恢复"从不轮转"，`logKeep: 0` 则不留历史（每次轮转只是清空当前文件）。
-两者都是普通配置字段，配置页或 profile patch 里都能改。
-
-注意这些是**诊断日志而非审计流水**：启动行会记录门禁路径（`secret=…`），
-所以这些日志文件应当和你的 profile 配置同等看待。
-
-## 配置页
-
-配置页是一个双面客户端包。浏览器半注册进插件页的 **`plugins.row.config`** 槽，
-键为 `dsh-remote-access-proxy#remote-access-proxy`，并通过 `configForms` 客户端服务
-读写配置——官方设置页同款的分阶段表单。它仅在宿主提供 `remote-access-proxy` 命名
-空间时注册，因此从未组合该插件的部署不会看到任何痕迹。
-
-## 从 0.3.0 迁移
-
-DSH 0.1.7 移除了 `settings.yaml`，所以 0.3.0 在它上面加载不了。升级本身只是一次版本
-前移 + 一次一次性导入：
-
-1. **先升级 DSH**，再在 profile 目录里重跑
-   `pnpm add github:citydirector/dsh-remote-access-proxy` 前移 pin，并 toggle 该 bundle。
-2. **旧值会自动跟过来。** 升级后首次启动时，DSH 会把 `data/settings.yaml` 里的
-   `remote-access-proxy:` 段导入 profile patch，并把该文件改名为 `settings.yaml.imported`。
-   这次导入按 **profile entry id** 匹配——宿主行之所以叫 `remote-access-proxy` 就是为此；
-   沿用旧行 id `dsh-remote-access-proxy` 的那一段会被拒绝。
-3. **顺手看一眼日志。** 被组合拒绝的段只会记一条 warn，值仍留在改名后的文件里；在 DSH
-   日志里搜 `settings: section … was not imported into entry` 即可确认。
-4. **卡片换位置了。** 它不再是插件面板里的顶层卡片，而是该 bundle 的
-   `remote-access-proxy` 行的配置页。
-
-## 测试
+## 手动安装 / 命令行
 
 ```bash
-pnpm install                      # 只需一次：插件要 import @deepseek-ai/schemastery
-node test-remote-access-proxy.mjs # 默认加载它旁边的插件（已安装的 bundle 副本也行：
-                                  # DSH_PLUGIN=/path/to/plugin.mjs）
-# 期望：36 passed, 0 failed
+dsh plugin --profile web add github:citydirector/dsh-remote-access-proxy
 ```
 
-它 mock 一个 DSH 上游（复刻 launchToken 交换 + `dsh-auth` Cookie 门禁），并 mock 插件
-周围的 0.1.7 宿主契约——volatile Config 引用、`loader/volatile-update`、profile 配置
-编辑器、编辑器所处的 HMR 事务守卫、`webStartup` 地址与页面策略调用——然后校验门禁
-放行/拒绝、Cookie 注入、token 剥离、303 Location 重写、401 自愈、WS 升级、`access.log`
-轮转（阈值、环、关断开关）、生成值回写（含先脱离热重载事务）、上游自动探测与显式覆盖、
-volatile 字段契约，以及 bundle/包布局（patch 行可解析到文件、元数据已打包、浏览器半
-注册了行配置页且覆盖每个字段）。测试会快照/还原整个日志环，不留痕。
+git 依赖由 profile 的 `pnpm-lock.yaml` 钉在某个提交上。要更新到新版本，在 profile 目录里用同样的写法再执行一次 `pnpm add`，然后把插件关掉再打开。
+
+## 开发
+
+```
+dsh-remote-access-proxy/
+├── package.json                      # bundle 清单 + dsh.client；"." = 代理，"./client" = 配置页
+├── cordis.patch.yml                  # 插件插入的那一行（按包名加载）
+├── plugin/dsh-remote-access-proxy.mjs  # 宿主侧：门禁 + 转发 + 状态接口
+├── client/index.js                   # 浏览器侧：配置页
+├── config/cordis.patch.example.yml   # 手动配置模板
+├── locale/{en,zh}.json               # 插件页标题与描述
+└── test-remote-access-proxy.mjs      # 端到端测试（模拟 DSH）
+```
+
+```bash
+pnpm install
+node test-remote-access-proxy.mjs   # 期望：49 passed, 0 failed
+```
+
+测试会模拟 DSH 上游（launch token 交换 + `dsh-auth` Cookie 门禁）以及插件依赖的宿主契约，覆盖：门禁、Cookie 注入、token 剥离、303 改写、401 自愈、WS 升级、日志轮转、密钥生成与写回、状态接口、错误原因（非法路径、端口占用）、1.1 → 1.2 迁移、上游自动探测，以及包结构。

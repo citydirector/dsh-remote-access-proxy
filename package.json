@@ -1,8 +1,8 @@
 {
   "name": "dsh-remote-access-proxy",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
-  "description": "DSH web GUI remote-access proxy as a profile bundle: a random-path + HttpOnly-cookie reverse proxy with a DSH launch-token bridge, plus its configuration card.",
+  "description": "Reach the DSH Web GUI from your phone or another computer: a random-path + HttpOnly-cookie reverse proxy that bridges DSH's per-start launch token, configured from its own page in the Plugins panel.",
   "license": "MIT",
   "icon": "icon.svg",
   "repository": {
@@ -10,14 +10,16 @@
     "url": "git+https://github.com/citydirector/dsh-remote-access-proxy.git"
   },
   "exports": {
+    ".": "./plugin/dsh-remote-access-proxy.mjs",
+    "./client": "./client/index.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json",
     "./locale/*": "./locale/*"
   },
   "files": [
     "cordis.patch.yml",
-    "plugin",
-    "ui",
+    "plugin/dsh-remote-access-proxy.mjs",
+    "client/index.js",
     "config",
     "locale",
     "icon.svg",
@@ -28,6 +30,13 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ],
+      "platform": "web"
     }
   },
   "engines": {
@@ -38,5 +47,6 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.4"
-  }
+  },
+  "main": "./plugin/dsh-remote-access-proxy.mjs"
 }

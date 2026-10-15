@@ -20,7 +20,8 @@
 import http from "node:http"
 import { randomBytes } from "node:crypto"
 import { dirname, join } from "node:path"
-import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import vm from "node:vm"
 
@@ -169,7 +170,7 @@ function createMockDsh() {
  * `_commit(patch)` is the Loader half: it moves the references and re-fires
  * `loader/volatile-update`, exactly as `Entry._commitVolatile` does.
  */
-function createCtx(initial, connection, { webStartup } = {}) {
+function createCtx(initial, connection, { webStartup, documentPath } = {}) {
   const state = { ...initial }
   const refs = {}
   for (const field of Object.keys(state)) refs[field] = { get: () => state[field] }
@@ -213,7 +214,7 @@ function createCtx(initial, connection, { webStartup } = {}) {
   }
   const ctx = {
     connection,
-    fiber: { entry: { options: { id: ROW_ID, name: "./plugin/dsh-remote-access-proxy.mjs", config: undefined } } },
+    fiber: { entry: { options: { id: ROW_ID, name: BUNDLE, config: undefined } } },
     root: { loader: { await: () => Promise.resolve() } },
     get(name) {
       if (name === "configEditor") return editor
@@ -230,8 +231,10 @@ function createCtx(initial, connection, { webStartup } = {}) {
       list.push(fn)
       handlers.set(event, list)
     },
+    // Cordis runs an effect at once and keeps the disposer it returns.
     effect(fn) {
-      ctx._dispose = fn
+      const dispose = fn()
+      if (typeof dispose === "function") disposers.push(dispose)
     },
     _refs: refs,
     _state: state,
@@ -249,10 +252,12 @@ function createCtx(initial, connection, { webStartup } = {}) {
       for (const fn of handlers.get("loader/volatile-update") ?? []) fn([["config"]])
     },
     _disposeAll() {
-      if (ctx._dispose) ctx._dispose()
+      while (disposers.length > 0) disposers.pop()()
     },
   }
+  const disposers = []
   const editor = {
+    documentPath,
     async edit(target, change) {
       if (executing.getStore()) {
         stats.nestedRejections += 1
@@ -286,8 +291,8 @@ function readPackage(root, pluginDir) {
   const patchPath = typeof patchRel === "string" ? join(root, patchRel) : undefined
   const patch = patchPath !== undefined && existsSync(patchPath) ? readFileSync(patchPath, "utf8") : ""
   const rows = [...patch.matchAll(/id:\s*(\S+)\s*\n\s*name:\s*(\S+)/g)].map((m) => ({ id: m[1], name: m[2] }))
-  const clientRel = JSON.parse(readFileSync(join(pluginDir, "..", "ui", "package.json"), "utf8")).exports["./client"]
-  const clientPath = join(root, "ui", clientRel)
+  const clientRel = pkg.exports?.["./client"]
+  const clientPath = typeof clientRel === "string" ? join(root, clientRel) : ""
   const clientSource = existsSync(clientPath) ? readFileSync(clientPath, "utf8") : ""
   return { pkg, root, patchPath, patch, rows, clientPath, clientSource }
 }
@@ -315,10 +320,28 @@ async function main() {
   // Reserve an explicit free port so the proxy's bound port is deterministic.
   const proxyPort = await freePort()
 
+  // The 0.2 connection also carries the authenticated /api Fetch registry the
+  // status route rides; keep every registration so the test can call it.
+  const routes = new Map()
   const connection = {
     authenticatedUrl(base) {
       return `${base}/?token=${LAUNCH_TOKEN}`
     },
+    fetch: {
+      register(route) {
+        routes.set(route.path, route)
+        return async () => {
+          if (routes.get(route.path) === route) routes.delete(route.path)
+        }
+      },
+    },
+  }
+  /** Read the status document the configuration page polls. */
+  async function readStatus() {
+    const route = routes.get(plugin.STATUS_ROUTE)
+    if (route === undefined) return undefined
+    const response = await route.fetch(new Request("http://127.0.0.1" + plugin.STATUS_ROUTE))
+    return await response.json()
   }
   // secretPath / cookieValue empty on purpose: the plugin must generate both and
   // persist them into the profile configuration.
@@ -371,6 +394,20 @@ async function main() {
   check("entry through the generated path -> 200 index", r.status === 200 && r.body.includes("index ok"), `got ${r.status} ${r.body}`)
   check("entry sets the gate cookie", Array.isArray(r.headers["set-cookie"]) && r.headers["set-cookie"][0].startsWith(`dsh_et_gate=${generatedCookie}`))
   check("entry serves the DSH index via the proxy-held cookie", r.status === 200)
+
+  // 1b) the gate path without its trailing slash redirects into it, so the
+  //     client's `<base href="./">` assets stay under the gate.
+  r = await httpReq(proxyPort, { path: `/${generatedPath}` })
+  check("gate path without a slash -> 308 to the slash form", r.status === 308 && r.headers.location === `/${generatedPath}/`, `status=${r.status} loc=${r.headers.location}`)
+
+  // 1c) the status route the page reads: running, with the address to open.
+  let status = await readStatus()
+  check("status route is registered on the authenticated /api channel", status !== undefined && plugin.STATUS_ROUTE === "/api/remote-access-proxy/status")
+  check(
+    "status reports listening with the entry address",
+    status?.state === "listening" && Array.isArray(status.urls) && status.urls.includes(`http://127.0.0.1:${proxyPort}/${generatedPath}/`),
+    JSON.stringify(status),
+  )
 
   // 2) PASS /api with only the gate cookie -> 200, DSH cookie injected upstream.
   r = await httpReq(proxyPort, { path: "/api/session/me", headers: { cookie: GATE } })
@@ -438,6 +475,65 @@ async function main() {
   await sleep(150)
   const afterDisable = await httpReq(proxyPort, { path: `/${generatedPath}/` }).catch(() => ({ status: "conn-error" }))
   check("volatile enabled=false stops the listener", afterDisable.status === "conn-error", `got ${afterDisable.status}`)
+  status = await readStatus()
+  check("status reports disabled", status?.state === "disabled", JSON.stringify(status))
+
+  // 8a) problems the page has to explain instead of failing silently.
+  const badCtx = createCtx(
+    { ...ctx2._state, enabled: true, listenPort: await freePort(), secretPath: "has/slash", cookieValue: "validcookie123" },
+    connection,
+  )
+  routes.clear()
+  plugin.apply(badCtx, badCtx._refs)
+  await sleep(100)
+  status = await readStatus()
+  check("an invalid gate path is refused with a reason", status?.state === "error" && status.code === "bad-secret-path", JSON.stringify(status))
+  badCtx._disposeAll()
+
+  const busyCtx = createCtx(
+    { ...ctx2._state, enabled: true, listenPort: mock.port, secretPath: "abcd1234", cookieValue: "validcookie123" },
+    connection,
+  )
+  plugin.apply(busyCtx, busyCtx._refs)
+  await sleep(150)
+  status = await readStatus()
+  check("a busy port is reported, not swallowed", status?.state === "error" && status.code === "port-in-use" && status.listenPort === mock.port, JSON.stringify(status))
+  busyCtx._disposeAll()
+
+  // 8a') migration from the pre-1.2 row: the user patch names the module by an
+  //      absolute file URL (copied there by the configuration editor). It must be
+  //      rewritten to the package name, and the saved gate values must survive —
+  //      no fresh secrets minted while the loader brings them back.
+  const migrationDir = mkdtempSync(join(tmpdir(), "rap-migrate-"))
+  const userPatch = join(migrationDir, "cordis.patch.yml")
+  writeFileSync(userPatch, [
+    "- id: remote-access-proxy",
+    "  name: file:///C:/old/place/node_modules/dsh-remote-access-proxy/plugin/dsh-remote-access-proxy.mjs",
+    "  config:",
+    "    secretPath: keepme123",
+    "    cookieValue: keepcookie12345",
+    "- id: something-else",
+    "  name: ./plugin/dsh-remote-access-proxy.mjs",
+    "",
+  ].join("\n"))
+  const migratePort = await freePort()
+  const migrateCtx = createCtx(
+    { ...ctx2._state, enabled: true, listenPort: migratePort, secretPath: "", cookieValue: "" },
+    connection,
+    { documentPath: userPatch },
+  )
+  plugin.apply(migrateCtx, migrateCtx._refs)
+  await sleep(150)
+  const migrated = readFileSync(userPatch, "utf8")
+  check("migration rewrites the stale absolute module name", migrated.includes("  name: dsh-remote-access-proxy\n  config:") && !migrated.includes("file:///C:/old"), migrated)
+  check("migration leaves other rows alone", migrated.includes("- id: something-else\n  name: ./plugin/dsh-remote-access-proxy.mjs"), migrated)
+  check("no replacement secrets are minted while the saved ones load", migrateCtx._writes.length === 0, JSON.stringify(migrateCtx._writes))
+  migrateCtx._commit({ secretPath: "keepme123", cookieValue: "keepcookie12345" })
+  await sleep(150)
+  r = await httpReq(migratePort, { path: "/keepme123/" })
+  check("the saved gate path still works after migration", r.status === 200 && migrateCtx._writes.length === 0, `got ${r.status}`)
+  migrateCtx._disposeAll()
+  rmSync(migrationDir, { recursive: true, force: true })
 
   // 8b) upstream auto-detect: an empty host / port 0 follow the running
   //     instance's published `webStartup` address instead of the historical 3080
@@ -571,10 +667,19 @@ async function main() {
 
   check("generated values are written exactly once", ctx2._writes.length === 1, `writes=${ctx2._writes.length}`)
 
-  const hostRow = layout.rows.find((row) => row.name.endsWith("dsh-remote-access-proxy.mjs"))
-  const uiRow = layout.rows.find((row) => row.name.endsWith("ui/lib/index.js"))
-  check("bundle patch declares the host row as the settings namespace", hostRow?.id === ROW_ID, JSON.stringify(layout.rows))
-  check("every patch row resolves inside the package", [hostRow, uiRow].every((row) => row !== undefined && existsSync(join(root, row.name))), JSON.stringify(layout.rows))
+  const hostRow = layout.rows.find((row) => row.id === ROW_ID)
+  check("bundle patch declares the host row as the settings namespace", hostRow !== undefined && layout.rows.length === 1, JSON.stringify(layout.rows))
+  check("the row names the package, never a path (portable installs)", hostRow?.name === BUNDLE, JSON.stringify(layout.rows))
+  check(
+    "the package root is the host plugin and the client page",
+    layout.pkg.name === BUNDLE
+      && typeof layout.pkg.exports?.["."] === "string" && join(root, layout.pkg.exports["."]) === fileURLToPath(PLUGIN_URL)
+      && existsSync(layout.clientPath)
+      && layout.pkg.dsh?.client?.platform === "web",
+    JSON.stringify(layout.pkg.exports),
+  )
+  const tokens = new Set(Array.from({ length: 50 }, () => plugin.genToken(12)))
+  check("generated secrets are random lowercase alphanumerics", tokens.size === 50 && [...tokens].every((token) => /^[a-z0-9]{12}$/.test(token)))
   check("package metadata is packaged (icon + locale dictionaries)", [
     layout.pkg.icon,
     "locale/en.json",
@@ -598,6 +703,12 @@ async function main() {
       && clientSource.includes(`"${ROW_ID}"`)
       && clientSource.includes("configForms")
       && clientSource.includes("whileServed"),
+  )
+  check(
+    "the browser half renders booleans as switches and reads the status route",
+    clientSource.includes('entry.kind === "boolean"')
+      && !clientSource.includes("entry.spec.kind")
+      && clientSource.includes('"' + plugin.STATUS_ROUTE.slice(1) + '"'),
   )
   check(
     "every Config field is editable in the browser half",

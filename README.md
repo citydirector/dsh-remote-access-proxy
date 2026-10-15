@@ -2,210 +2,134 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-A remote-access proxy for the DSH (DeepSeek Harness) Web GUI, shipped as a **DSH
-profile bundle**: it embeds a reverse proxy that safely exposes the Web GUI and its
-`/api` to any remote front (easytier, ZeroTier, Tailscale, nginx, Caddy, Cloudflare
-Tunnel, or a plain LAN IP), bridges the per-process launch-token auth of newer DSH
-builds, and contributes its own configuration page to the Plugins panel.
+Use DSH (DeepSeek Harness) from your phone, tablet, or another computer's browser.
 
-Built for **DSH 0.1.7-rc.1 or newer** (the profile-owned configuration model). The
-bundle declares that requirement in `peerDependencies`, so installing it on an older
-harness is refused with an explanation instead of failing at load.
+The plugin runs a small reverse proxy inside DSH. A remote device opens one address with a random path and gets the full Web GUI, without ever needing the launch token DSH changes on every start. Anything can sit in front: a LAN IP, easytier, ZeroTier, Tailscale, nginx, Caddy, Cloudflare Tunnel.
 
-## Install
+Requires **DSH 0.1.7-rc.1 or newer** (tested on 0.2.0-rc.2).
 
-This repository **is** a bundle package, so the Plugins page can install it straight
-from the GitHub URL.
+## Three steps
 
-### From the Plugins page (recommended)
+1. **Install**: sidebar **Plugins** → Add plugin, and give it
+   ```
+   https://github.com/citydirector/dsh-remote-access-proxy
+   ```
+   Switch it on.
+2. **Get the address**: open **Remote Access Proxy** in the plugin list, then the **Remote Access Proxy** component under it. The top of the page shows whether it is running and the **entry addresses**. Click **Copy**.
+3. **Open it remotely**: on a device on the same network, open the address in a browser, e.g. `http://192.168.1.20:13337/k3x9q2m7p1zt/`. The first visit sets the gate cookie; after that the whole site works.
 
-Open the sidebar **Plugins** panel → install, and give it the repository URL:
+Nothing needs configuring: port 13337 on every interface, with the random path and cookie generated and saved on first start.
 
+> **Set your API key on this machine first.** DSH does not let remote pages change settings (DSH's own rule, not this plugin's), so the API key, models and the rest are set in DSH on the host. Remote pages can create sessions, chat, and pick workspaces normally.
+
+## The configuration page
+
+![Configuration page](docs/config-page.en.png)
+
+- **Status**: running, off, or not running — and when it failed, why and what to do ("Port 13337 is already in use", "The certificate could not be loaded"), instead of a line buried in a log.
+- **Entry addresses**: one per network interface, each with a copy button.
+- **Gate**: one click regenerates the path and cookie. After saving, the old address and every signed-in device stop working — use it if the address may have leaked.
+- On/off settings are switches. A save applies at once: the proxy restarts in place, DSH does not.
+
+The page appears on the host only; remote pages don't show it, again by DSH's design.
+
+## Do I need TLS?
+
+No. DSH 0.2 works over plain http.
+
+- **VPN / home LAN**: http is fine; the traffic is already on a private network.
+- **Internet**: turn TLS on, or put the proxy behind an HTTPS reverse proxy (Caddy, nginx, Cloudflare Tunnel).
+
+TLS needs a `.pfx` certificate. A self-signed one on Windows (PowerShell):
+
+```powershell
+$cert = New-SelfSignedCertificate -DnsName "dsh.local" -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(5)
+Export-PfxCertificate -Cert $cert -FilePath .\data\certs\dsh-proxy.pfx -Password (ConvertTo-SecureString "your-passphrase" -AsPlainText -Force)
 ```
-https://github.com/citydirector/dsh-remote-access-proxy
+
+On macOS / Linux (openssl):
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 1825 -subj "/CN=dsh.local" -keyout key.pem -out cert.pem
+openssl pkcs12 -export -inkey key.pem -in cert.pem -out dsh-proxy.pfx -passout pass:your-passphrase
 ```
 
-The manager runs pnpm against the URL, resolves `dsh.bundle.patch`, and adds the
-bundle's rows to the profile's user layer. Enable the bundle, then open the bundle's
-page, open the **`remote-access-proxy`** row and use its 配置 page.
+Then switch on "Enable TLS" in the page, fill in the path and passphrase, and save. Browsers ask you to accept the certificate once. With TLS the gate cookie also gets the `Secure` flag.
 
-### From a profile's CLI
+## Troubleshooting
+
+| The page says | Do this |
+|---|---|
+| Port … is already in use | Pick another port, or close what holds it. Two DSH apps sharing one `data` directory (portable + desktop) do this too — see below |
+| … is not an address of this machine | Use `0.0.0.0`, or one interface address of this machine (not a subnet) |
+| The certificate could not be loaded | Check the path (relative to DSH's working directory) and the passphrase |
+| Can't read the proxy status | The plugin isn't running: check both the plugin's and the component's switches |
+
+- **`forbidden` on the remote device**: the path is wrong or the cookie was cleared. Enter again through the full entry address.
+- **Two DSH apps sharing one `$DSH_HOME`** read the same profile and fight over one port. Switch "Enabled" off in one of them, or give each its own port.
+
+## Security model
+
+Access control is entirely the proxy's gate:
+
+- **Random path**: the entry is `<address>:<port>/<secretPath>/`, generated from the OS CSPRNG;
+- **HttpOnly cookie**: the first visit through the entry sets `dsh_et_gate` (`Path=/; HttpOnly; SameSite=Strict`, plus `Secure` with TLS); after that the whole origin is allowed, and anything without the cookie gets 403.
+
+The proxy forwards to DSH as loopback (Host rewritten to `127.0.0.1:<port>`, Origin stripped) and **performs the launch-token exchange itself, holding the `dsh-auth-*` cookie**, so remote users never see the per-start token. On an upstream 401 it drops that cookie and exchanges again.
+
+The path is the key: treat the entry address like a password. The `access.log` startup line records it too.
+
+## Configuration
+
+Every field is a `.volatile()` field of the plugin's Cordis `Config`, stored in the active profile's `cordis.patch.yml`. Edit them in the page, or by hand from [`config/cordis.patch.example.yml`](config/cordis.patch.example.yml).
+
+| Field | Description |
+|---|---|
+| `enabled` | Stop listening when off |
+| `listenHost` | Bind address (`0.0.0.0` = every interface) |
+| `listenPort` | Bind port (default `13337`) |
+| `secretPath` | Gate path (4–32 letters, digits, `-`, `_`; generated when empty) |
+| `cookieValue` | Gate cookie value (8+ letters, digits, `-`, `_`; generated when empty) |
+| `upstreamHost` / `upstreamPort` | Upstream DSH. Empty / `0` follows the running instance: 3080 for `dsh web`, 19387 for the desktop app |
+| `tlsEnabled` / `tlsPfxPath` / `tlsPassphrase` | TLS (pfx certificate) |
+| `logMaxBytes` / `logKeep` | `access.log` rotation: rotate past the cap (default 1 MiB), keep this many old files (default 3); `0` turns rotation / history off |
+
+## Upgrading from 1.1
+
+Nothing to do:
+
+- 1.1 named its components by relative path, and DSH's first configuration save expanded that into an **absolute path** in the profile — so a portable install stopped loading the plugin once its folder moved.
+- 1.2 loads by package name. On its first start it rewrites that stale absolute path in the profile to the package name and **keeps your gate path and cookie**, so bookmarked addresses keep working.
+- The two components (proxy + page) are now one, shown in the Plugins page with a proper title and icon instead of a long `file:///…` path.
+
+### Migrating from 0.3.0
+
+DSH 0.1.7 removed `settings.yaml`. Update DSH first, then the plugin, and switch it off and on. On first start DSH imports the `remote-access-proxy:` section of `data/settings.yaml` into the profile and renames the file to `settings.yaml.imported`.
+
+## Manual install / CLI
 
 ```bash
 dsh plugin --profile web add github:citydirector/dsh-remote-access-proxy
 ```
 
-A git dependency is pinned to a commit by the profile's `pnpm-lock.yaml`, so a plain
-`pnpm install` never moves it. To take a newer release, re-run `pnpm add` with the
-same spec from the profile directory and toggle the bundle off and on — that is also
-what makes `node_modules`, `.modules.yaml` and `pnpm-lock.yaml` agree again.
+A git dependency is pinned to a commit by the profile's `pnpm-lock.yaml`. To take a newer release, run `pnpm add` with the same spec in the profile directory, then switch the plugin off and on.
 
-### By hand
-
-Copy `plugin/`, `ui/`, `locale/` and `icon.svg` into the profile and insert the two
-rows yourself:
-
-```yaml
-# data/profiles/web/cordis.patch.yml
-- insert:
-    - id: remote-access-proxy
-      name: ./plugin/dsh-remote-access-proxy.mjs
-    - id: remote-access-proxy-ui
-      name: ./ui/lib/index.js
-```
-
-The host row's id is load-bearing: on 0.1.7+ a plugin's settings namespace **is** its
-profile entry id. A hand-copied install also has no bundle entry in the Plugins page,
-so it gets no 配置 page — edit the profile patch by hand instead.
-
-Two DSH apps that share one `$DSH_HOME` (the portable and desktop apps pointed at the same
-`data` directory) resolve the same profile patch, so both would bind the same `listenPort`.
-Keep one of them off with `enabled: false` (or a row-level `disabled: true`), or give each a
-different `listenPort`.
-
-## Layout
+## Development
 
 ```
 dsh-remote-access-proxy/
-├── package.json                      # bundle manifest: dsh.bundle.patch, icon, engines/peers
-├── cordis.patch.yml                  # the two rows this bundle inserts
-├── plugin/
-│   └── dsh-remote-access-proxy.mjs   # host-plane gateway (gate + forward server)
-├── ui/                               # configuration page (dual-face package)
-│   ├── package.json                  # dsh.client declaration + exports["./client"]
-│   └── lib/{index.js,client.js}      # host half (row anchor) + browser half (page)
-├── config/cordis.patch.example.yml   # sanitized profile-patch template
-├── locale/{en,zh}.json               # Plugins-page title/description dictionaries
-├── icon.svg                          # Plugins-page artwork
-├── test-remote-access-proxy.mjs      # mock-DSH end-to-end tests (31 checks)
-└── README.md / README.zh-CN.md
+├── package.json                        # bundle manifest + dsh.client; "." = proxy, "./client" = page
+├── cordis.patch.yml                    # the one row this bundle inserts (by package name)
+├── plugin/dsh-remote-access-proxy.mjs  # host: gate + forwarding + status route
+├── client/index.js                     # browser: the configuration page
+├── config/cordis.patch.example.yml     # hand-configuration template
+├── locale/{en,zh}.json                 # Plugins-page title and description
+└── test-remote-access-proxy.mjs        # end-to-end tests against a mock DSH
 ```
-
-`access.log` (and its rotated `.1`… siblings) is runtime output and never committed.
-
-## Why it is needed
-
-Newer DSH authenticates every browser session with two layers:
-
-1. **Host/Origin trust fence** — `/api` accepts only a loopback Host or explicit
-   `trustedHosts`, with a matching same-origin `Origin`;
-2. **Browser-session auth** — every process start mints a random `launchToken`
-   (`http://127.0.0.1:3080/?token=…`); `/api` without the `dsh-auth-*` signed cookie
-   answers 401.
-
-The proxy forwards to DSH as loopback (Host rewritten to `127.0.0.1:3080`, Origin
-stripped) and **performs the token exchange itself, holding the `dsh-auth-*` cookie**.
-Remote users only need the random path + HttpOnly-cookie gate and **never see the
-per-start launchToken**.
-
-## Security model
-
-Access control is carried entirely by the proxy's gate:
-
-- **Random path** — the entry is `https://<IP>:<port>/<secretPath>/`;
-- **HttpOnly cookie** — the first visit through the entry mints `dsh_et_gate`
-  (`Path=/; HttpOnly; SameSite=Strict`); afterwards the whole origin is allowed.
-
-Enable TLS (`tlsEnabled: true`) — `crypto.randomUUID` needs a secure context, so plain
-HTTP breaks the Web client. Certificate load failure refuses to start (fail-loud).
-
-## Configuration
-
-Every field is a `.volatile()` field of the plugin's own Cordis `Config`, so its values
-live in the active profile's `cordis.patch.yml` — edit them in the 配置 page of the
-`remote-access-proxy` row (Plugins panel), or merge
-[`config/cordis.patch.example.yml`](config/cordis.patch.example.yml) into the profile
-patch by hand. `secretPath` / `cookieValue` are generated and written back on first
-start when left empty.
-
-A save writes the profile patch and is applied immediately: the plugin is **not**
-remounted, the embedded server just restarts with the new values.
-
-| Field | Description |
-|---|---|
-| `enabled` | Stop listening when disabled |
-| `listenHost` | Bind address (`0.0.0.0` = all interfaces) |
-| `listenPort` | Bind port (default `13337`) |
-| `secretPath` | Random gate path (4–32 chars) |
-| `cookieValue` | Gate HttpOnly cookie value |
-| `upstreamHost` / `upstreamPort` | Upstream DSH. Left empty (`""` / `0`) the address is auto-detected from the running instance (see below) |
-| `tlsEnabled` / `tlsPfxPath` / `tlsPassphrase` | Self-signed TLS (pfx) |
-| `logMaxBytes` / `logKeep` | `access.log` rotation: rotate once a write would pass this size (default `1048576` = 1 MiB) and keep this many older files (default `3`). `logMaxBytes: 0` = never rotate; `logKeep: 0` = keep no history |
-
-Entry: `https://<IP>:<port>/<secretPath>/` (accept the self-signed certificate once per device).
-
-### Upstream address
-
-`upstreamHost` / `upstreamPort` name the DSH instance this proxy fronts. Left empty the
-address is read at start time from the live `webStartup` service of the process it runs
-in — `dsh web`'s `--port` (default `3080`), or the desktop launcher's fixed
-`--port 19387` — so a deployment needs no per-instance configuration. Explicit values
-always win; with no web server to read, the historical `127.0.0.1:3080` is the last
-resort. The resolved address is logged (`upstream 127.0.0.1:19387 (auto)`).
-
-## Log rotation
-
-Every gated request (`ENTRY` / `PASS` / `DENY`), listener change and DSH 401 self-heal
-is appended to `access.log` beside the plugin in the profile's `node_modules`. Left
-alone that file grows without bound, so it rotates by size instead:
-
-- a line that would push the file past `logMaxBytes` (default 1 MiB) rotates first;
-- the full file becomes `access.log.1`, older files shift to `access.log.2`, … and
-  whatever passes `logKeep` (default `3`) is deleted;
-- the live `access.log` therefore always stays under the cap, and the whole ring is
-  bounded at `logMaxBytes × (logKeep + 1)`.
-
-Set `logMaxBytes: 0` to restore the never-rotate behaviour, or `logKeep: 0` to keep no
-history at all (each rotation just truncates the live file). Both are ordinary config
-fields, editable in the 配置 page or in the profile patch.
-
-Note that these lines are diagnostics, not an audit trail: the startup line records the
-gate path (`secret=…`), so treat the log files with the same care as your profile
-configuration.
-
-## The configuration page
-
-The page is a dual-face client package. On the browser side it registers into the
-Plugins page's **`plugins.row.config`** slot, keyed
-`dsh-remote-access-proxy#remote-access-proxy`, and reads/writes through the `configForms`
-client service — the staged form the shipped settings pages use. It registers only
-while the Host serves the `remote-access-proxy` namespace, so a deployment that never
-composed the plugin shows no trace of it.
-
-## Migrating from 0.3.0
-
-DSH 0.1.7 removed `settings.yaml`, so 0.3.0 does not load on it. Upgrading is a
-version bump plus one one-shot import:
-
-1. **Update DSH first**, then re-pin the bundle (`pnpm add
-   github:citydirector/dsh-remote-access-proxy` in the profile directory) and toggle it.
-2. **Your values come along.** On the first start after the upgrade DSH imports the
-   `remote-access-proxy:` section of `data/settings.yaml` into the profile patch and
-   renames the file to `settings.yaml.imported`. That import matches on the profile
-   entry id, which is exactly why the row is named `remote-access-proxy`; the same
-   section under the old row id `dsh-remote-access-proxy` would be rejected.
-3. **Check the log once.** A section the composition rejects is only warned about and
-   stays in the renamed file; grep the DSH log for
-   `settings: section … was not imported into entry`.
-4. **The card moved.** It is no longer a top-level card in the Plugins panel; it is the
-   配置 page of the bundle's `remote-access-proxy` row.
-
-## Tests
 
 ```bash
-pnpm install                      # once: the plugin imports @deepseek-ai/schemastery
-node test-remote-access-proxy.mjs # loads the plugin beside it (an installed bundle copy
-                                  # works too: DSH_PLUGIN=/path/to/plugin.mjs)
-# Expected: 36 passed, 0 failed
+pnpm install
+node test-remote-access-proxy.mjs   # Expected: 49 passed, 0 failed
 ```
 
-It mocks a DSH upstream (launch-token exchange + `dsh-auth` cookie gate) and the 0.1.7
-host contract around the plugin — volatile Config references, `loader/volatile-update`,
-the profile configuration editor, the HMR transaction guard the editor runs inside, the
-`webStartup` address, and the page-policy call — then checks the gate, cookie
-injection, token stripping, 303 Location rewrite, 401 self-heal, WS upgrade,
-`access.log` rotation (cap, ring, off switch), generated-secret write-back (including
-leaving the hot-reload transaction first), upstream auto-detect and explicit override,
-the volatile-field contract, and the bundle/package layout (patch rows resolve, metadata
-is packaged, the browser half registers the row page and edits every field). It
-snapshots and restores the whole log ring so runs leave no trace.
+The tests mock a DSH upstream (launch-token exchange + `dsh-auth` cookie gate) and the host contract the plugin relies on, and cover the gate, cookie injection, token stripping, 303 rewrite, 401 self-heal, WS upgrade, log rotation, secret generation and write-back, the status route, failure reasons (invalid path, busy port), the 1.1 → 1.2 migration, upstream auto-detect, and the package layout.

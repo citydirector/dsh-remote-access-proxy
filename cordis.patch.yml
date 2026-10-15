@@ -1,19 +1,18 @@
-# The dsh-remote-access-proxy profile bundle patch: one insert over the profile
-# root. Rows are addressed by id, so a later bundle layer or the user's own
-# profile cordis.patch.yml can override either one (the last write wins per row).
+# The dsh-remote-access-proxy profile bundle patch: one row over the profile
+# root. A later bundle layer or the user's own profile cordis.patch.yml can
+# override it by id (the last write wins per row).
 #
-# `./` module names resolve inside this bundle package, so the same patch works
-# for a pnpm install from a git URL and for a copy dropped into the profile by
-# hand. The configuration card is the `ui/` package's host half; its browser half
-# is the package's exports["./client"], picked up by the client-module scan.
+# The row names the PACKAGE, not a `./` path: DSH resolves a relative name to an
+# absolute file URL, and the configuration editor copies that absolute URL into
+# the user patch on its first write — which breaks the row as soon as the DSH
+# folder moves (a portable install). A package name resolves from the profile's
+# node_modules wherever it lives. The same package is a dual-face module: its
+# "." export is the host plugin, its "./client" export the configuration page,
+# so the row gets the package's title, description and icon in the Plugins page.
 #
-# The host row's id is load-bearing on DSH 0.1.7+: a plugin's settings namespace
-# IS its profile entry id, so the row id has to equal the namespace the legacy
-# `settings.yaml` section and the browser card both address. Renaming it moves
-# the settings form and stops the one-shot settings.yaml import from matching.
+# The row id is load-bearing: a plugin's settings namespace IS its profile entry
+# id, so renaming it moves the settings form and orphans saved values.
 
 - insert:
     - id: remote-access-proxy
-      name: ./plugin/dsh-remote-access-proxy.mjs
-    - id: remote-access-proxy-ui
-      name: ./ui/lib/index.js
+      name: dsh-remote-access-proxy

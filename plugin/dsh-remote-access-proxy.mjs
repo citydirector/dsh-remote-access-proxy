@@ -43,11 +43,15 @@
 
 import http from "node:http"
 import https from "node:https"
+import { randomBytes } from "node:crypto"
 import { appendFileSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { networkInterfaces } from "node:os"
 import { fileURLToPath } from "node:url"
 import z from "@deepseek-ai/schemastery"
 
 export const name = "dsh-remote-access-proxy"
+/** Package name the bundle row loads this plugin by (portable across installs). */
+const PACKAGE = "dsh-remote-access-proxy"
 
 /**
  * Required services. `connection` carries this process's launch token. The
@@ -65,6 +69,12 @@ const NS = "remote-access-proxy"
 const HERE = fileURLToPath(new URL(".", import.meta.url))
 /** Name of the HttpOnly cookie this proxy's gate mints. */
 const GATE_COOKIE = "dsh_et_gate"
+/** Authenticated status route the configuration page reads (below DSH's own `/api`). */
+export const STATUS_ROUTE = "/api/remote-access-proxy/status"
+/** What a gate path may contain: it is one URL segment. */
+const SECRET_PATH_PATTERN = /^[A-Za-z0-9_-]{4,32}$/
+/** What a gate cookie value may contain: a cookie-octet subset without separators. */
+const COOKIE_VALUE_PATTERN = /^[A-Za-z0-9_-]{8,128}$/
 /** Rotation defaults, used when a settings object predates the log fields. */
 const DEFAULT_LOG_MAX_BYTES = 1024 * 1024
 const DEFAULT_LOG_KEEP = 3
@@ -114,11 +124,58 @@ export const Config = z.object({
   logKeep: z.number().default(DEFAULT_LOG_KEEP).volatile(),
 })
 
-function genToken(length) {
+/**
+ * A random lowercase alphanumeric token from the OS CSPRNG. The gate path and
+ * cookie ARE the access control, so `Math.random` (predictable) is not enough.
+ * Rejection sampling keeps every character equally likely.
+ */
+export function genToken(length) {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
+  const limit = 256 - (256 % chars.length)
   let out = ""
-  for (let i = 0; i < length; i += 1) out += chars[Math.floor(Math.random() * chars.length)]
+  while (out.length < length) {
+    for (const byte of randomBytes(length * 2)) {
+      if (byte >= limit) continue
+      out += chars[byte % chars.length]
+      if (out.length === length) break
+    }
+  }
   return out
+}
+
+/**
+ * The addresses a remote device can reach this listener on: the bind address
+ * itself, or every external IPv4 interface when bound to all of them.
+ *
+ * @param listenHost - the configured bind address.
+ * @returns host literals, best first; never empty.
+ */
+export function reachableHosts(listenHost) {
+  if (listenHost !== "0.0.0.0" && listenHost !== "::" && listenHost !== "") return [listenHost]
+  const hosts = []
+  for (const list of Object.values(networkInterfaces())) {
+    for (const item of list ?? []) {
+      const v4 = item.family === "IPv4" || item.family === 4
+      if (v4 && !item.internal) hosts.push(item.address)
+    }
+  }
+  return hosts.length > 0 ? hosts : ["127.0.0.1"]
+}
+
+/**
+ * Why a resolved configuration cannot start. `code` lets the page say it in the
+ * user's language; `message` is the English line for the log.
+ *
+ * @param settings - resolved settings (secrets already generated).
+ * @returns `{ code, message }`, or undefined when the values are usable.
+ */
+export function configProblem(settings) {
+  const port = settings.listenPort
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return { code: "bad-port", message: `listenPort must be an integer from 1 to 65535 (got ${port})` }
+  if (!SECRET_PATH_PATTERN.test(settings.secretPath)) return { code: "bad-secret-path", message: "secretPath must be 4–32 letters, digits, '-' or '_'" }
+  if (!COOKIE_VALUE_PATTERN.test(settings.cookieValue)) return { code: "bad-cookie", message: "cookieValue must be 8–128 letters, digits, '-' or '_'" }
+  if (settings.tlsEnabled && !settings.tlsPfxPath) return { code: "tls-no-cert", message: "tlsEnabled needs tlsPfxPath (a .pfx certificate file)" }
+  return undefined
 }
 
 /** Byte size of a file, or 0 when it does not exist. */
@@ -261,7 +318,7 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
         if (upRes.statusCode === 401) onUpstream401?.()
         const outHeaders = { ...upRes.headers }
         if (setGate) {
-          outHeaders["set-cookie"] = `${GATE_COOKIE}=${cookieValue}; Path=/; HttpOnly; SameSite=Strict`
+          outHeaders["set-cookie"] = `${GATE_COOKIE}=${cookieValue}; Path=/; HttpOnly; SameSite=Strict${settings.tlsEnabled ? "; Secure" : ""}`
           // Defensive: today the token is always stripped, so DSH never redirects
           // on the gate path; should it ever answer a root-relative Location,
           // re-enter through the gate instead of the ungated origin root.
@@ -286,6 +343,14 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
   const handler = (req, res) => {
     const url = new URL(req.url, "http://" + (req.headers.host || "local"))
     const path = routePath(url.pathname)
+    if (url.pathname === prefix && (req.method === "GET" || req.method === "HEAD")) {
+      // The client resolves its assets against `<base href="./">`: without the
+      // trailing slash they would land outside the gate path.
+      log(`ENTRY ${req.method} ${req.url} -> ${prefix}/`)
+      res.writeHead(308, { location: prefix + "/" + url.search })
+      res.end()
+      return
+    }
     if (path !== undefined) {
       log(`ENTRY ${req.method} ${req.url}`)
       return forward(req, res, path, url.search, true)
@@ -350,14 +415,14 @@ function buildServer(settings, log, getDshCookie, onUpstream401) {
       )
     } catch (err) {
       log(`TLS init failed (${err.message}); proxy NOT started — set tlsEnabled=false for plain HTTP, or fix tlsPfxPath/tlsPassphrase`)
-      return undefined
+      return { code: "tls-load", error: `TLS certificate could not be loaded: ${err.message}` }
     }
   } else {
     server = http.createServer(handler)
   }
   server.on("upgrade", handleUpgrade)
 
-  return server
+  return { server }
 }
 
 /**
@@ -371,6 +436,11 @@ export function apply(ctx, config) {
   let current = undefined
   let dshCookie = undefined
   let exchanging = undefined
+  /**
+   * What the configuration page shows: whether the listener is up and, if not,
+   * why. `state` is one of starting | listening | disabled | error.
+   */
+  let status = { state: "starting" }
 
   // This plugin ships its own page for its row; tell the settings service not to
   // offer a generated one. Optional: a deployment without settings still runs.
@@ -384,6 +454,48 @@ export function apply(ctx, config) {
     } catch {
       /* best effort */
     }
+  }
+
+  /** Record a failure the page should show, and say it on the DSH console too. */
+  function fail(message, code = "error") {
+    status = { state: "error", code, error: message }
+    log(message)
+    ctx.logger?.warn?.("remote-access-proxy: %s", message)
+  }
+
+  /** The status document the configuration page renders. */
+  function statusDocument() {
+    const settings = current
+    const doc = { ...status }
+    if (settings !== undefined) {
+      const scheme = settings.tlsEnabled ? "https" : "http"
+      doc.scheme = scheme
+      doc.listenHost = settings.listenHost
+      doc.listenPort = settings.listenPort
+      doc.upstream = `${settings.upstreamHost}:${settings.upstreamPort}`
+      doc.tls = settings.tlsEnabled === true
+      doc.urls = reachableHosts(settings.listenHost).map((host) => `${scheme}://${host.includes(":") ? `[${host}]` : host}:${settings.listenPort}/${settings.secretPath}/`)
+    }
+    return doc
+  }
+
+  // The page reads the live status through DSH's own authenticated /api channel,
+  // so it is exactly as private as the rest of the API.
+  if (typeof ctx.connection?.fetch?.register === "function") {
+    ctx.effect(() => {
+      const dispose = ctx.connection.fetch.register({
+        path: STATUS_ROUTE,
+        methods: ["GET"],
+        requestBody: "buffered",
+        fetch: async () => new Response(JSON.stringify(statusDocument()), {
+          status: 200,
+          headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+        }),
+      })
+      return () => {
+        void Promise.resolve(typeof dispose === "function" ? dispose() : undefined).catch(() => {})
+      }
+    }, "dsh-remote-access-proxy: status route")
   }
 
   /** Read one `.get()` per configured field; an absent field keeps its schema default. */
@@ -541,21 +653,100 @@ export function apply(ctx, config) {
     void getDshCookie()
   }
 
+  /**
+   * Releases before 1.2 named the row by a relative path (`./plugin/…mjs`). DSH
+   * resolved it to an absolute file URL, and the configuration editor copied that
+   * URL into the user patch together with the generated gate values. The bundle
+   * now names the row by its package, and a user row naming a different module
+   * no longer applies to it — the saved gate path and cookie would be silently
+   * replaced by fresh ones, and the address every device bookmarked would die.
+   *
+   * So rewrite such a stale row's `name:` to the package, synchronously, before
+   * the first start. The loader's config watcher then reconciles the row and the
+   * saved values arrive as an ordinary volatile update.
+   *
+   * @returns true when the user patch was rewritten.
+   */
+  function healUserPatch() {
+    const path = ctx.get?.("configEditor")?.documentPath
+    if (typeof path !== "string") return false
+    let text
+    try {
+      text = readFileSync(path, "utf8")
+    } catch {
+      return false
+    }
+    let inRow = false
+    let changed = false
+    const lines = text.split("\n").map((line) => {
+      const id = /^\s*-\s+id:\s*(['"]?)([^'"\s]+)\1\s*$/.exec(line)
+      if (id !== null) {
+        inRow = id[2] === NS
+        return line
+      }
+      if (/^\s*-\s/.test(line)) inRow = false
+      if (!inRow) return line
+      const match = /^(\s*)name:\s*(.*?)\s*$/.exec(line)
+      if (match === null) return line
+      const value = match[2].replace(/^(['"])(.*)\1$/, "$2").replace(/\\/g, "/")
+      if (value === PACKAGE || !value.endsWith("plugin/dsh-remote-access-proxy.mjs")) return line
+      changed = true
+      return `${match[1]}name: ${PACKAGE}${line.endsWith("\r") ? "\r" : ""}`
+    })
+    if (!changed) return false
+    try {
+      writeFileSync(path, lines.join("\n"))
+      log(`migrated the row's module name to "${PACKAGE}" in ${path}`)
+      return true
+    } catch (error) {
+      log(`could not migrate the row's module name (${error.message})`)
+      return false
+    }
+  }
+
   function start(settings) {
     stop()
+    if (awaitingMigration && (!settings.secretPath || !settings.cookieValue)) {
+      status = { state: "starting" }
+      log("waiting for the migrated configuration before starting")
+      return
+    }
     const resolved = ensureSecrets({ ...settings, ...resolveUpstream(settings) })
     current = resolved
     if (!resolved.enabled) {
+      status = { state: "disabled" }
       log("disabled")
       return
     }
-    server = buildServer(resolved, log, getDshCookie, onUpstream401)
-    if (server === undefined) {
-      log("proxy not started (see TLS init error above)")
+    const problem = configProblem(resolved)
+    if (problem !== undefined) {
+      fail(`not started: ${problem.message}`, problem.code)
       return
     }
-    server.on("error", (err) => log(`server error ${err.code || err.message}`))
-    server.listen(resolved.listenPort, resolved.listenHost, () => {
+    const built = buildServer(resolved, log, getDshCookie, onUpstream401)
+    if (built.error !== undefined) {
+      fail(built.error, built.code)
+      return
+    }
+    const own = built.server
+    server = own
+    status = { state: "starting" }
+    own.on("error", (err) => {
+      if (server !== own) return
+      const code = { EADDRINUSE: "port-in-use", EADDRNOTAVAIL: "bad-address", EACCES: "port-denied" }[err.code] ?? "listen-error"
+      const reason = err.code === "EADDRINUSE"
+        ? `port ${resolved.listenPort} is already in use on ${resolved.listenHost} (another program, or a second DSH app sharing this profile)`
+        : err.code === "EADDRNOTAVAIL"
+          ? `${resolved.listenHost} is not an address of this machine`
+          : err.code === "EACCES"
+            ? `no permission to listen on port ${resolved.listenPort}`
+            : `listener error ${err.code || err.message}`
+      fail(reason, code)
+      server = undefined
+    })
+    own.listen(resolved.listenPort, resolved.listenHost, () => {
+      if (server !== own) return
+      status = { state: "listening" }
       log(`listening on ${resolved.listenHost}:${resolved.listenPort} secret=/${resolved.secretPath}`)
     })
     // Warm the DSH session cookie so the first remote request is fast.
@@ -573,12 +764,30 @@ export function apply(ctx, config) {
     }
   }
 
+  // A migrated user patch brings the saved gate values back through the loader
+  // watcher; until then, do not mint (and persist) replacements for them.
+  let awaitingMigration = healUserPatch()
+  let migrationTimer
+  if (awaitingMigration) {
+    migrationTimer = setTimeout(() => {
+      if (!awaitingMigration) return
+      awaitingMigration = false
+      log("migrated values did not arrive; starting with the current configuration")
+      start(readConfig())
+    }, 10000)
+    migrationTimer.unref?.()
+  }
   start(readConfig())
 
   // A volatile-only configuration edit keeps this instance and lands here.
   ctx.on("loader/volatile-update", () => {
+    awaitingMigration = false
+    clearTimeout(migrationTimer)
     start(readConfig())
   })
 
-  ctx.effect(() => () => stop(), "dsh-remote-access-proxy: proxy server")
+  ctx.effect(() => () => {
+    clearTimeout(migrationTimer)
+    stop()
+  }, "dsh-remote-access-proxy: proxy server")
 }
