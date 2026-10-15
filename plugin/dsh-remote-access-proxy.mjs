@@ -23,6 +23,14 @@
  * - Diagnostics go to a size-bounded `access.log` beside this file: it rotates
  *   at `logMaxBytes` and keeps `logKeep` older files (`access.log.1`…), so a
  *   long-running deployment cannot grow an unbounded log.
+ * - Update check (1.4): a few seconds after start, then about every 12 hours,
+ *   the release tags of the GitHub repository are read and the newest `vX.Y.Z`
+ *   is compared with this package's version; the result rides the status route.
+ *   Nothing is installed here: the configuration page hands the tag-pinned spec
+ *   (`github:<repo>#vX.Y.Z`) to DSH's own plugin manager, which installs it over
+ *   this package and hot-swaps the plugin. A hot swap disposes this instance,
+ *   so dispose closes the listener and every open connection at once and the
+ *   new version can bind the same port right away.
  *
  * DSH browser-auth bridge (2026-09-04): DSH now authenticates every browser
  * session with a per-process launch token (`http://<upstream>/?token=…`)
@@ -47,6 +55,7 @@ import http from "node:http"
 import https from "node:https"
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto"
 import { BlockList, isIP } from "node:net"
+import { execFile } from "node:child_process"
 import { appendFileSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { networkInterfaces } from "node:os"
 import { fileURLToPath } from "node:url"
@@ -88,6 +97,15 @@ const LOGIN_MAX_FAILURES = 5
 const LOGIN_WINDOW_MS = 5 * 60 * 1000
 /** A ready-made allow list: private LANs, CGNAT/Tailscale, IPv6 ULA and link-local. */
 export const PRIVATE_NETWORKS = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7, fe80::/10"
+/** Where releases are published: the GitHub repository whose `vX.Y.Z` tags are releases. */
+export const UPDATE_REPOSITORY = "citydirector/dsh-remote-access-proxy"
+/** First update check this long after start (leave startup alone), then every UPDATE_INTERVAL_MS. */
+const UPDATE_DELAY_MS = 5000
+const UPDATE_INTERVAL_MS = 12 * 60 * 60 * 1000
+/** A release tag: `v` + three numeric parts, nothing after (pre-releases are never offered). */
+const RELEASE_TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
+/** Authenticated route the page asks for an immediate update check. */
+export const UPDATE_CHECK_ROUTE = "/api/remote-access-proxy/update-check"
 /** Rotation defaults, used when a settings object predates the log fields. */
 const DEFAULT_LOG_MAX_BYTES = 1024 * 1024
 const DEFAULT_LOG_KEEP = 3
@@ -107,6 +125,7 @@ const FIELDS = [
   "tlsPassphrase",
   "logMaxBytes",
   "logKeep",
+  "updateCheck",
 ]
 
 /**
@@ -143,7 +162,128 @@ export const Config = z.object({
   // keep (0 = keep no history, just truncate).
   logMaxBytes: z.number().default(DEFAULT_LOG_MAX_BYTES).volatile(),
   logKeep: z.number().default(DEFAULT_LOG_KEEP).volatile(),
+  // Look for a newer release on GitHub (a few seconds after start, then about
+  // every 12 hours). Never installs anything by itself.
+  updateCheck: z.boolean().default(true).volatile(),
 })
+
+/**
+ * Read a release tag.
+ *
+ * @param tag - a git tag name.
+ * @returns `[major, minor, patch]`, or undefined for anything that is not `vX.Y.Z`.
+ */
+export function parseReleaseTag(tag) {
+  const match = RELEASE_TAG.exec(String(tag ?? "").trim())
+  return match === null ? undefined : [Number(match[1]), Number(match[2]), Number(match[3])]
+}
+
+/**
+ * Compare two versions written `X.Y.Z` or `vX.Y.Z`.
+ *
+ * @returns negative, zero or positive like a sort comparator; a version that
+ *   does not parse sorts below every one that does.
+ */
+export function compareVersions(a, b) {
+  const tag = (value) => (String(value ?? "").startsWith("v") ? String(value) : `v${value}`)
+  const pa = parseReleaseTag(tag(a))
+  const pb = parseReleaseTag(tag(b))
+  if (pa === undefined || pb === undefined) return (pa === undefined ? 0 : 1) - (pb === undefined ? 0 : 1)
+  for (let i = 0; i < 3; i += 1) if (pa[i] !== pb[i]) return pa[i] - pb[i]
+  return 0
+}
+
+/**
+ * The newest release among tag names: `vX.Y.Z` only, highest by semantic
+ * version (not by date or list order).
+ *
+ * @param tags - tag names, in any order.
+ * @returns the newest release tag, or undefined when there is none.
+ */
+export function latestRelease(tags) {
+  let best
+  for (const tag of tags ?? []) {
+    if (parseReleaseTag(tag) === undefined) continue
+    if (best === undefined || compareVersions(tag, best) > 0) best = tag
+  }
+  return best
+}
+
+/**
+ * Where releases come from. The default is the GitHub repository; the
+ * `DSH_RAP_UPDATE_SOURCE` environment variable can name another GitHub
+ * repository (`owner/repo`) or any git URL (`git+file:///…`, `git+https://…`),
+ * which is how a release is rehearsed against a local repository before it is
+ * published.
+ *
+ * @param env - the environment to read.
+ * @returns `{ kind: "github", repository, spec }` or `{ kind: "git", url, spec }`;
+ *   `spec` is the install spec without its `#tag`.
+ */
+export function updateSource(env = process.env) {
+  const raw = String(env.DSH_RAP_UPDATE_SOURCE ?? "").trim()
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw)) return { kind: "github", repository: raw, spec: `github:${raw}` }
+  if (/^git(\+[a-z]+)?:\/\//i.test(raw)) return { kind: "git", url: raw.replace(/^git\+/i, ""), spec: raw }
+  return { kind: "github", repository: UPDATE_REPOSITORY, spec: `github:${UPDATE_REPOSITORY}` }
+}
+
+/** The tag-pinned install spec of one release: a new spec each release, so DSH installs it over the old one. */
+export function releaseSpec(source, tag) {
+  return `${source.spec}#${tag}`
+}
+
+/**
+ * Read the tag names of a release source.
+ *
+ * @param source - from `updateSource()`.
+ * @param options - `{ api, signal }`: the GitHub API base URL, an abort signal.
+ * @returns the tag names (GitHub: the newest 100 the API lists).
+ */
+export async function fetchReleaseTags(source, { api = "https://api.github.com", signal } = {}) {
+  if (source.kind === "git") {
+    const output = await new Promise((resolve, reject) => {
+      execFile("git", ["ls-remote", "--tags", "--", source.url], { timeout: 20000, signal, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } }, (error, stdout) => {
+        if (error) reject(error)
+        else resolve(stdout)
+      })
+    })
+    return output.split("\n").map((line) => /refs\/tags\/([^\s^]+)$/.exec(line.trim())?.[1]).filter(Boolean)
+  }
+  const response = await fetch(`${api.replace(/\/+$/, "")}/repos/${source.repository}/tags?per_page=100`, {
+    headers: { accept: "application/vnd.github+json", "user-agent": "dsh-remote-access-proxy", "x-github-api-version": "2022-11-28" },
+    signal,
+  })
+  if (!response.ok) {
+    const limited = response.status === 403 || response.status === 429
+    throw new Error(limited ? `GitHub rate limit (HTTP ${response.status})` : `GitHub answered HTTP ${response.status}`)
+  }
+  const body = await response.json()
+  if (!Array.isArray(body)) throw new Error("GitHub answered something other than a tag list")
+  return body.map((item) => item?.name).filter((name) => typeof name === "string")
+}
+
+/**
+ * Compare a tag list with the running version.
+ *
+ * @param tags - tag names of the release source.
+ * @param current - this package's version (`X.Y.Z`).
+ * @returns `{ state: "available", latest }` when a newer release exists, else `{ state: "current", latest? }`.
+ */
+export function updateVerdict(tags, current) {
+  const latest = latestRelease(tags)
+  if (latest !== undefined && compareVersions(latest, current) > 0) return { state: "available", latest }
+  return { state: "current", ...(latest !== undefined ? { latest } : {}) }
+}
+
+/** This package's own version, read fresh: after a hot swap it is the new one. */
+function packageVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"))
+    return typeof pkg.version === "string" ? pkg.version : undefined
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * A random lowercase alphanumeric token from the OS CSPRNG. The gate path and
@@ -412,6 +552,12 @@ function writeLogLine(dir, line, maxBytes, keep) {
  */
 function buildServer(settings, log, getDshCookie, onUpstream401, onDenied) {
   const { secretPath, upstreamHost, upstreamPort } = settings
+  /** Every live socket, both sides of a bridged websocket included, so a stop can end them all. */
+  const sockets = new Set()
+  const track = (socket) => {
+    sockets.add(socket)
+    socket.once("close", () => sockets.delete(socket))
+  }
   const prefix = "/" + secretPath
   const password = settings.password || ""
   const allow = parseAllowList(settings.allowFrom).list
@@ -648,6 +794,7 @@ function buildServer(settings, log, getDshCookie, onUpstream401, onDenied) {
       }
       socket.write("\r\n")
       if (upHead && upHead.length) socket.write(upHead)
+      track(upSocket)
       upSocket.pipe(socket)
       socket.pipe(upSocket)
       socket.on("error", () => upSocket.destroy())
@@ -681,14 +828,47 @@ function buildServer(settings, log, getDshCookie, onUpstream401, onDenied) {
   // The allow list acts like a firewall: a client outside it is dropped before
   // any byte (or TLS handshake) is exchanged, so a scan learns nothing.
   server.on("connection", (socket) => {
-    if (addressAllowed(allow, socket.remoteAddress)) return
+    if (addressAllowed(allow, socket.remoteAddress)) {
+      track(socket)
+      return
+    }
     const address = plainAddress(socket.remoteAddress)
     log(`DENY-ADDRESS ${address}`)
     onDenied?.(address)
     socket.destroy()
   })
 
-  return { server }
+  /**
+   * Stop listening. `hard` also ends every open connection at once — keep-alive
+   * sockets, requests in flight and bridged websockets — so nothing of this
+   * instance outlives it (a hot swap disposes it; the browser reconnects to the
+   * new version). A configuration restart is soft: it frees the port and closes
+   * idle keep-alive sockets, and a websocket open now keeps running.
+   */
+  function stop(hard) {
+    try {
+      server.close()
+    } catch {
+      /* already closed */
+    }
+    if (hard) {
+      try {
+        server.closeAllConnections?.()
+      } catch {
+        /* best effort */
+      }
+      for (const socket of sockets) socket.destroy()
+      sockets.clear()
+    } else {
+      try {
+        server.closeIdleConnections?.()
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+
+  return { server, stop }
 }
 
 /**
@@ -699,6 +879,8 @@ function buildServer(settings, log, getDshCookie, onUpstream401, onDenied) {
  */
 export function apply(ctx, config) {
   let server = undefined
+  /** Stops the running server (soft or hard); see buildServer. */
+  let stopServer = undefined
   let current = undefined
   let dshCookie = undefined
   let exchanging = undefined
@@ -709,6 +891,26 @@ export function apply(ctx, config) {
   let status = { state: "starting" }
   /** The last client address the allow list turned away, for the page. */
   let lastDenied = undefined
+  /**
+   * This package's installed version. Read on every use, not once: an update
+   * whose host file is unchanged (only the page or the metadata changed) is
+   * installed without remounting this instance, and the page must still see
+   * the new number.
+   */
+  const installedVersion = () => packageVersion()
+  const version = installedVersion()
+  const source = updateSource()
+  /**
+   * What the page shows about releases. `state`: off | pending | checking |
+   * current | available | failed; `checkedAt` is the last finished check,
+   * `latest` the newest release tag seen, `error` why the last check failed.
+   */
+  let update = { state: "pending" }
+  let updateTimer = undefined
+  let updateInterval = undefined
+  let checking = undefined
+  /** Aborts a check in flight when this instance goes away. */
+  const updateAbort = new AbortController()
 
   // This plugin ships its own page for its row; tell the settings service not to
   // offer a generated one. Optional: a deployment without settings still runs.
@@ -734,7 +936,7 @@ export function apply(ctx, config) {
   /** The status document the configuration page renders. */
   function statusDocument() {
     const settings = current
-    const doc = { ...status }
+    const doc = { ...status, version: installedVersion(), update: updateDocument() }
     if (settings !== undefined) {
       const scheme = settings.tlsEnabled ? "https" : "http"
       doc.scheme = scheme
@@ -745,9 +947,76 @@ export function apply(ctx, config) {
       doc.password = typeof settings.password === "string" && settings.password !== ""
       doc.allowFrom = allow.bad.length === 0 ? allow.entries : []
       if (lastDenied !== undefined) doc.lastDenied = lastDenied
+      doc.updateCheck = settings.updateCheck !== false
       doc.urls = reachableHosts(allow.bad.length === 0 ? allow.list : undefined).map((host) => `${scheme}://${host.includes(":") ? `[${host}]` : host}:${settings.listenPort}/${settings.secretPath}/`)
     }
     return doc
+  }
+
+  /** The update part of the status document; `spec` is what the page installs. */
+  function updateDocument() {
+    const running = installedVersion()
+    const doc = { ...update, source: source.spec }
+    // A release found earlier may be installed by now.
+    if (doc.state === "available" && running !== undefined && compareVersions(doc.latest, running) <= 0) doc.state = "current"
+    if (doc.stale === "available" && running !== undefined && compareVersions(doc.latest, running) <= 0) delete doc.stale
+    if (doc.latest !== undefined) doc.spec = releaseSpec(source, doc.latest)
+    if (running !== undefined) doc.currentSpec = releaseSpec(source, `v${running}`)
+    return doc
+  }
+
+  /**
+   * Read the release tags once and record the verdict. Failures (offline, rate
+   * limited, no git) are recorded for the page and never thrown or retried
+   * early: the next scheduled check tries again.
+   */
+  function checkForUpdate() {
+    if (checking !== undefined) return checking
+    const running = installedVersion()
+    if (running === undefined) {
+      update = { state: "failed", error: "own version unreadable", checkedAt: new Date().toISOString() }
+      return Promise.resolve()
+    }
+    const previous = update
+    update = { ...previous, state: "checking" }
+    const signal = AbortSignal.any([updateAbort.signal, AbortSignal.timeout(20000)])
+    checking = fetchReleaseTags(source, { api: process.env.DSH_RAP_UPDATE_API || undefined, signal })
+      .then((tags) => {
+        update = { ...updateVerdict(tags, running), checkedAt: new Date().toISOString() }
+        log(`update check: ${update.state}${update.latest ? ` (newest ${update.latest}, running ${running})` : ""}`)
+      }, (error) => {
+        if (updateAbort.signal.aborted) return
+        const message = error?.name === "TimeoutError" || error?.name === "AbortError" ? "timed out" : String(error?.message ?? error).split("\n")[0].slice(0, 200)
+        // Keep what an earlier check found: a transient failure does not hide a known release.
+        update = { ...(previous.latest !== undefined ? { latest: previous.latest } : {}), state: "failed", error: message, checkedAt: new Date().toISOString(), ...(previous.state === "available" ? { stale: "available" } : {}) }
+        log(`update check failed: ${message}`)
+      })
+      .finally(() => {
+        checking = undefined
+      })
+    return checking
+  }
+
+  /** Follow the `updateCheck` switch: schedule checks while on, clear them while off. */
+  function scheduleUpdateChecks(enabled) {
+    if (!enabled) {
+      clearTimeout(updateTimer)
+      clearInterval(updateInterval)
+      updateTimer = undefined
+      updateInterval = undefined
+      update = { state: "off" }
+      return
+    }
+    if (updateTimer !== undefined || updateInterval !== undefined) return
+    if (update.state === "off") update = { state: "pending" }
+    const delay = Number(process.env.DSH_RAP_UPDATE_DELAY_MS)
+    updateTimer = setTimeout(() => {
+      updateTimer = undefined
+      void checkForUpdate()
+      updateInterval = setInterval(() => void checkForUpdate(), UPDATE_INTERVAL_MS)
+      updateInterval.unref?.()
+    }, Number.isFinite(delay) && delay >= 0 ? delay : UPDATE_DELAY_MS)
+    updateTimer.unref?.()
   }
 
   // The page reads the live status through DSH's own authenticated /api channel,
@@ -767,6 +1036,24 @@ export function apply(ctx, config) {
         void Promise.resolve(typeof dispose === "function" ? dispose() : undefined).catch(() => {})
       }
     }, "dsh-remote-access-proxy: status route")
+    // "Check now" on the page: one check, answered with the fresh status.
+    ctx.effect(() => {
+      const dispose = ctx.connection.fetch.register({
+        path: UPDATE_CHECK_ROUTE,
+        methods: ["POST"],
+        requestBody: "buffered",
+        fetch: async () => {
+          if (current?.updateCheck !== false) await checkForUpdate()
+          return new Response(JSON.stringify(statusDocument()), {
+            status: 200,
+            headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+          })
+        },
+      })
+      return () => {
+        void Promise.resolve(typeof dispose === "function" ? dispose() : undefined).catch(() => {})
+      }
+    }, "dsh-remote-access-proxy: update check route")
   }
 
   /** Read one `.get()` per configured field; an absent field keeps its schema default. */
@@ -976,7 +1263,8 @@ export function apply(ctx, config) {
   }
 
   function start(settings) {
-    stop()
+    stop(false)
+    scheduleUpdateChecks(settings.updateCheck !== false)
     if (awaitingMigration && (!settings.secretPath || !settings.cookieValue)) {
       status = { state: "starting" }
       log("waiting for the migrated configuration before starting")
@@ -1004,6 +1292,7 @@ export function apply(ctx, config) {
     }
     const own = built.server
     server = own
+    stopServer = built.stop
     status = { state: "starting" }
     own.on("error", (err) => {
       if (server !== own) return
@@ -1011,6 +1300,15 @@ export function apply(ctx, config) {
       if (bindHost === "::" && (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL")) {
         bindHost = "0.0.0.0"
         own.listen(resolved.listenPort, bindHost, onListening)
+        return
+      }
+      // The instance this one replaces (a hot swap, a restart) may still be
+      // releasing the port for a moment: try again briefly before giving up.
+      if (err.code === "EADDRINUSE" && bindRetries > 0) {
+        bindRetries -= 1
+        setTimeout(() => {
+          if (server === own) own.listen(resolved.listenPort, bindHost, onListening)
+        }, 250)
         return
       }
       const code = { EADDRINUSE: "port-in-use", EACCES: "port-denied" }[err.code] ?? "listen-error"
@@ -1024,24 +1322,27 @@ export function apply(ctx, config) {
     })
     // Every interface, IPv6 and IPv4 alike; who may connect is the allow list's job.
     let bindHost = "::"
+    let bindRetries = 8
     const onListening = () => {
       if (server !== own) return
       status = { state: "listening" }
-      log(`listening on ${bindHost === "::" ? "[::]" : bindHost}:${resolved.listenPort} secret=/${resolved.secretPath} password=${resolved.password ? "on" : "off"} allow=${resolved.allowFrom || "any"}`)
+      log(`listening on ${bindHost === "::" ? "[::]" : bindHost}:${resolved.listenPort}${version ? ` v${version}` : ""} secret=/${resolved.secretPath} password=${resolved.password ? "on" : "off"} allow=${resolved.allowFrom || "any"}`)
     }
     own.listen(resolved.listenPort, bindHost, onListening)
     // Warm the DSH session cookie so the first remote request is fast.
     void getDshCookie()
   }
 
-  function stop() {
+  /** Stop the listener; `hard` (dispose) also ends every open connection. */
+  function stop(hard) {
     if (server !== undefined) {
       try {
-        server.close()
+        stopServer?.(hard)
       } catch {
         /* already closed */
       }
       server = undefined
+      stopServer = undefined
     }
   }
 
@@ -1069,6 +1370,10 @@ export function apply(ctx, config) {
 
   ctx.effect(() => () => {
     clearTimeout(migrationTimer)
-    stop()
+    clearTimeout(updateTimer)
+    clearInterval(updateInterval)
+    updateAbort.abort()
+    stop(true)
+    log(`stopped${version ? ` (v${version})` : ""}`)
   }, "dsh-remote-access-proxy: proxy server")
 }

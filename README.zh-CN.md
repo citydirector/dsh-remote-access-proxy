@@ -6,7 +6,7 @@
 
 插件在 DSH 里起一个小型反向代理：远程设备只要打开一个带随机路径的地址，就能用完整的 Web GUI，不用知道 DSH 每次启动都会变的 launch token。前面接什么都行：局域网 IP、easytier、ZeroTier、Tailscale、nginx、Caddy、Cloudflare Tunnel。
 
-需要 **DSH 0.1.7-rc.1 或更新**（已在 0.2.0-rc.2 上实测）。
+需要 **DSH 0.1.7-rc.1 或更新**（已在 0.2.0-rc.2 和 0.2.1-alpha.3 上实测）。
 
 ## 三步用起来
 
@@ -20,7 +20,7 @@
 
 默认什么都不用配：端口 13337、监听所有网卡、随机路径首次启动自动生成并保存。需要时再加访问密码，或限制哪些设备能连。
 
-> **先在本机配好 API Key。** DSH 不允许远程页面修改设置（这是 DSH 自己的安全规则，不是插件限制），所以 API Key、模型等设置要在本机的 DSH 里填。远程页面可以正常新建会话、聊天、选择工作区。
+> **先在本机配好 API Key。** DSH 的部分设置只能在本机页面修改（这是 DSH 自己的规则，不是插件限制；0.2.0 上远程页面完全不能改设置），所以 API Key 等要在本机的 DSH 里填。远程页面可以正常新建会话、聊天、选择工作区。
 
 ## 配置页
 
@@ -33,7 +33,7 @@
 - **重新生成入口路径**：保存后旧地址立即失效，适合怀疑地址泄露的时候用。
 - 开关类设置显示为开关；保存后立即生效，代理原地重启，不用重启 DSH。
 
-配置页只在本机页面出现；远程页面看不到，这一点同样由 DSH 决定。
+在 DSH 0.2.0 上配置页只在本机页面出现；0.2.1 起远程页面也能打开它，但**一键更新只在本机页面提供**。
 
 ## 要不要开 TLS
 
@@ -99,6 +99,41 @@ openssl pkcs12 -export -inkey key.pem -in cert.pem -out dsh-proxy.pfx -passout p
 | `upstreamHost` / `upstreamPort` | 上游 DSH。留空 / `0` 时自动读取当前实例的地址：`dsh web` 默认 3080，桌面端固定 19387 |
 | `tlsEnabled` / `tlsPfxPath` / `tlsPassphrase` | TLS（pfx 证书） |
 | `logMaxBytes` / `logKeep` | `access.log` 轮转：超过上限（默认 1 MiB）就轮转，保留若干份旧文件（默认 3）；`0` 分别表示不轮转、不留历史 |
+| `updateCheck` | 检查更新（默认开）：启动几秒后和之后每 12 小时读一次 GitHub 上的版本 tag；只提示，不会自动安装 |
+
+## 更新
+
+### 一键更新（1.4 起）
+
+插件启动几秒后，以及之后每 12 小时，会读一次本仓库在 GitHub 上的 tag，取最大的 `vX.Y.Z`（忽略预发布和其它 tag），和当前版本比较。结果显示在配置页状态卡的「版本」一行：**已是最新** / **有新版本 vX** / **检查更新失败**（带检查时间和原因）。断网或 GitHub 限流时只是显示失败，不影响代理。「立即检查」可以马上再查一次；不想联网检查可以在「高级」里关掉「检查更新」。
+
+有新版本时点 **更新到 vX**。插件通过 DSH 自己的插件管理（和「插件」页安装用的是同一个接口）安装 `github:citydirector/dsh-remote-access-proxy#vX`，DSH 会把它装到当前版本上并热替换，不用重启：
+
+- **已更新到 vX**：新版本已经在运行。入口地址、密码、白名单都保存在 profile 里，不受影响；已登录的设备不用重新登录。
+- **已安装，重启 DSH 后生效**：DSH 判断这次改动无法热替换，会写明原因（例如这个 profile 没有热重载，或插件之前是从别的来源安装的）。重启 DSH 即可。
+- **没有成功**：显示原因和详细输出，并提供 **回退到 v旧版** 按钮。新版本装上了但没能启动时，插件自己的配置页会被 DSH 隐藏，这时结果和回退按钮显示在页面右下角的卡片里。
+
+一键更新只在这台电脑上打开的页面里提供；远程页面只显示有新版本。插件不会自动更新。
+
+手动更新或回退也可以：**插件** → **添加插件**，填入 `github:citydirector/dsh-remote-access-proxy#v1.4.0` 这种带 tag 的地址。不带 tag、或者和已装的写法完全相同的地址，DSH 会提示「已经安装」。
+
+### 从 1.3 升级到 1.4
+
+1.3 还没有更新按钮，需要手动装一次：**插件** → **添加插件**，填入
+
+```
+github:citydirector/dsh-remote-access-proxy#v1.4.0
+```
+
+DSH 0.2.1 起会直接装到 1.3 上并热替换（实测从 1.3.0 升级，入口、密码、白名单都保留）。以后的版本就可以在配置页一键更新了。DSH 0.2.0 及更早没有热重载，按旧方式在 profile 目录里 `pnpm add` 这个地址后重启 DSH。
+
+### 发版约定
+
+1. 改 `package.json` 的 `version`，例如 `1.4.1`。
+2. 提交并推送到 `main`。
+3. 打 tag `v1.4.1`（必须是 `v` + 三段数字）并推送：`git tag v1.4.1 && git push origin v1.4.1`。
+
+只有 `vX.Y.Z` 格式的 tag 会被当成发布；`v1.5.0-rc.1` 这类预发布不会推送给用户。每个版本的安装地址都带自己的 tag，所以 DSH 才会把它当作新版本安装到旧版本上，因此**每次发版都必须打 tag**。
 
 ## 从 1.2 升级
 
@@ -123,7 +158,7 @@ DSH 0.1.7 移除了 `settings.yaml`。先升级 DSH，再更新插件并重新�
 dsh plugin --profile web add github:citydirector/dsh-remote-access-proxy
 ```
 
-git 依赖由 profile 的 `pnpm-lock.yaml` 钉在某个提交上。要更新到新版本，在 profile 目录里用同样的写法再执行一次 `pnpm add`，然后把插件关掉再打开。
+git 依赖由 profile 的 `pnpm-lock.yaml` 钉在某个提交上。命令行安装建议直接带 tag（`github:citydirector/dsh-remote-access-proxy#v1.4.0`）。DSH 运行中请用配置页或插件页更新；DSH 没有运行时，也可以在 profile 目录里用新的 tag 再执行一次 `pnpm add`。
 
 ## 开发
 
@@ -140,7 +175,9 @@ dsh-remote-access-proxy/
 
 ```bash
 pnpm install
-node test-remote-access-proxy.mjs   # 期望：69 passed, 0 failed
+node test-remote-access-proxy.mjs   # 期望：86 passed, 0 failed
 ```
 
-测试会模拟 DSH 上游（launch token 交换 + `dsh-auth` Cookie 门禁）以及插件依赖的宿主契约，覆盖：门禁、Cookie 注入、token 剥离、303 改写、401 自愈、WS 升级、日志轮转、密钥生成与写回、状态接口、错误原因（非法路径、端口占用、白名单写法错误）、密码登录（深链接、锁定、退出、失效）、来源白名单（断开、回环、上报）、1.1 → 1.2 迁移、上游自动探测，以及包结构。
+测试会模拟 DSH 上游（launch token 交换 + `dsh-auth` Cookie 门禁）以及插件依赖的宿主契约，覆盖：门禁、Cookie 注入、token 剥离、303 改写、401 自愈、WS 升级、日志轮转、密钥生成与写回、状态接口、错误原因（非法路径、端口占用、白名单写法错误）、密码登录（深链接、锁定、退出、失效）、来源白名单（断开、回环、上报）、1.1 → 1.2 迁移、上游自动探测、检查更新（tag 过滤、版本比较、失败与限流、开关、立即检查）、热替换时关闭全部连接并立即重新绑定端口，以及包结构。
+
+测试里检查更新只连本地模拟的 GitHub。要在真实 DSH 里演练一次发版，可以设置环境变量 `DSH_RAP_UPDATE_SOURCE` 指向别的来源再启动 DSH：`owner/repo`（另一个 GitHub 仓库）或任意 git 地址（例如带 tag 的本地裸仓库 `git+file:///path/to/repo.git`）。配置页的更新按钮会安装 `<来源>#<tag>`。

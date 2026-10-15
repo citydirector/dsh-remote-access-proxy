@@ -40,3 +40,6 @@
     # （access.log.1…N）；0 = 不轮转 / 不留历史。默认 1048576 字节、3 份。
     logMaxBytes: 1048576
     logKeep: 3
+    # 检查更新：启动几秒后和之后每 12 小时读一次 GitHub 上的 vX.Y.Z tag，
+    # 有新版本时在配置页提示（只提示，不自动安装）。false = 不联网检查。
+    updateCheck: true
