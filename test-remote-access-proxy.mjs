@@ -174,8 +174,12 @@ function createMockDsh() {
  *
  * `_commit(patch)` is the Loader half: it moves the references and re-fires
  * `loader/volatile-update`, exactly as `Entry._commitVolatile` does.
+ *
+ * `webServer` models the host's `webserver` row: `port` is the port the OS
+ * actually bound (undefined until `listen` returns), and `active: false` mimics
+ * a fiber that has not reached ACTIVE, where the strict `ctx.get` sees nothing.
  */
-function createCtx(initial, connection, { webStartup, documentPath } = {}) {
+function createCtx(initial, connection, { webStartup, webServer, documentPath } = {}) {
   const state = { ...initial }
   const refs = {}
   for (const field of Object.keys(state)) refs[field] = { get: () => state[field] }
@@ -221,10 +225,14 @@ function createCtx(initial, connection, { webStartup, documentPath } = {}) {
     connection,
     fiber: { entry: { options: { id: ROW_ID, name: BUNDLE, config: undefined } } },
     root: { loader: { await: () => Promise.resolve() } },
-    get(name) {
+    get(name, strict = true) {
       if (name === "configEditor") return editor
       if (name === "hmr") return hmr
       if (name === "webStartup") return webStartup
+      if (name === "webServer") {
+        if (webServer === undefined) return undefined
+        return strict && webServer.active === false ? undefined : webServer
+      }
       return undefined
     },
     inject(deps, callback) {
@@ -243,6 +251,8 @@ function createCtx(initial, connection, { webStartup, documentPath } = {}) {
     },
     _refs: refs,
     _state: state,
+    /** The live `webserver` row, poked by tests to model the OS binding a port late. */
+    _webServer: webServer,
     _writes: writes,
     _pagePolicies: pagePolicies,
     _injected: injected,
@@ -553,8 +563,7 @@ async function main() {
 
   // 8b) upstream auto-detect: an empty host / port 0 follow the running
   //     instance's published `webStartup` address instead of the historical 3080
-  //     default — this is what makes the desktop launcher (`--port 19387`) work
-  //     without any configuration.
+  //     default — this is what makes `dsh web` work without any configuration.
   const autoMock = await createMockDsh()
   const autoPort = await freePort()
   const ctx3 = createCtx(
@@ -624,6 +633,101 @@ async function main() {
   ctx3._disposeAll()
   ctx4._disposeAll()
   autoMock.server.close()
+  await sleep(50)
+
+  // 8c) `--port 0` hosts (the desktop launcher) publish `webStartup.port === 0`:
+  //     the requested "let the OS pick one", not a connectable port. The bound
+  //     port lives on `webServer` instead, and a proxy that ignored it forwarded
+  //     to the 3080 fallback and answered 502 bad gateway on every request.
+  const zeroMock = await createMockDsh()
+  const zeroPort = await freePort()
+  const ctx5 = createCtx(
+    {
+      enabled: true,
+      allowFrom: "",
+      password: "",
+      listenPort: zeroPort,
+      secretPath: "",
+      cookieValue: "",
+      upstreamHost: "",
+      upstreamPort: 0,
+      tlsEnabled: false,
+      tlsPfxPath: "",
+      tlsPassphrase: "",
+      logMaxBytes: 1024 * 1024,
+      logKeep: 3,
+    },
+    connection,
+    {
+      webStartup: { host: "127.0.0.1", port: 0 },
+      webServer: { host: "127.0.0.1", port: zeroMock.port },
+    },
+  )
+  plugin.apply(ctx5, ctx5._refs)
+  await sleep(150)
+  check("port 0 upstream reads the bound port from webServer", zeroMock.exchanges > 0, `exchanges=${zeroMock.exchanges}`)
+  const zeroPath = ctx5._writes[0]?.secretPath
+  const zeroGate = `dsh_et_gate=${ctx5._writes[0]?.cookieValue}`
+  r = await httpReq(zeroPort, { path: `/${zeroPath}/`, headers: { cookie: zeroGate } })
+  check(
+    "a --port 0 host is reachable through the gate instead of 502",
+    r.status === 200 && r.body.includes("index ok"),
+    `got ${r.status} ${String(r.body).slice(0, 60)}`,
+  )
+  let zeroLogged = true
+  try {
+    zeroLogged = readFileSync(REAL_LOG, "utf8").includes(`upstream 127.0.0.1:${zeroMock.port} (auto)`)
+  } catch {
+    zeroLogged = false
+  }
+  check("logs the webServer-bound upstream", zeroLogged)
+
+  // The window between plugin start and the OS binding a port: the service exists
+  // but has no port yet, so the start-time resolution still lands on the 3080
+  // fallback. The address is re-resolved per request, so the proxy recovers on its
+  // own — no timer, no restart, and no 502 once the port appears.
+  const latePort = await freePort()
+  const lateCtx = createCtx(
+    {
+      enabled: true,
+      allowFrom: "",
+      password: "",
+      listenPort: latePort,
+      secretPath: "lateretry1234",
+      cookieValue: "latesecret12345",
+      upstreamHost: "",
+      upstreamPort: 0,
+      tlsEnabled: false,
+      tlsPfxPath: "",
+      tlsPassphrase: "",
+      logMaxBytes: 1024 * 1024,
+      logKeep: 3,
+    },
+    connection,
+    { webStartup: { host: "127.0.0.1", port: 0 }, webServer: { host: "127.0.0.1", active: false } },
+  )
+  plugin.apply(lateCtx, lateCtx._refs)
+  await sleep(100)
+  const lateGate = "dsh_et_gate=latesecret12345"
+  r = await httpReq(latePort, { path: "/lateretry1234/", headers: { cookie: lateGate } })
+  check(
+    "an unbound upstream does not serve the entry while the port is unknown",
+    !(r.status === 200 && String(r.body).includes("index ok")),
+    `got ${r.status}`,
+  )
+  const earlyMock = await createMockDsh()
+  lateCtx._webServer.port = earlyMock.port
+  lateCtx._webServer.active = true
+  r = await httpReq(latePort, { path: "/lateretry1234/", headers: { cookie: lateGate } })
+  check(
+    "re-resolves the upstream once the OS-assigned port shows up",
+    r.status === 200 && r.body.includes("index ok") && earlyMock.exchanges > 0,
+    `got ${r.status} exchanges=${earlyMock.exchanges}`,
+  )
+  lateCtx._disposeAll()
+  earlyMock.server.close()
+  ctx5._disposeAll()
+  zeroMock.server.close()
   await sleep(50)
 
   // 9) access.log rotation: a tiny cap must rotate into access.log.1 and keep the

@@ -69,6 +69,7 @@ openssl pkcs12 -export -inkey key.pem -in cert.pem -out dsh-proxy.pfx -passout p
 
 - **远程设备完全连不上**（连接被重置）：它的地址不在白名单里。配置页会显示被拒绝的地址，把它加进去，或点「只允许局域网和 VPN」。
 - **远程打开显示 `forbidden`**：随机路径不对。重新打开完整的入口地址。
+- **页面只有一行纯文本 `bad gateway`**：代理连不上上游 DSH。状态卡的「上游」一行显示它正在用的地址，`access.log` 里记着原因（通常是 `ECONNREFUSED`）。把 `upstreamHost` / `upstreamPort` 留空 / `0`，让地址自动跟随当前实例。1.4.1 之前的桌面端必然踩这个坑：桌面启动器传的是 `--port 0`，而插件读的是 `webStartup` 上那个**请求值** `0`，没读 `webServer` 实际绑定的端口，于是掉到 3080。
 - **两个 DSH 共用一个 `$DSH_HOME`**：它们读同一份 profile，会抢同一个端口。在其中一个的配置页关掉「启用」，或者给两边设不同的端口。
 
 ## 安全模型
@@ -96,7 +97,7 @@ openssl pkcs12 -export -inkey key.pem -in cert.pem -out dsh-proxy.pfx -passout p
 | `allowFrom` | 允许连接的客户端地址：IP、网段、`a-b` 范围，用逗号或空格分隔。留空 = 不限制；本机始终允许 |
 | `password` | 可选的访问密码（留空 = 不需要） |
 | `cookieValue` | 给「记住设备」签名的服务端密钥（自动生成，配置页不显示） |
-| `upstreamHost` / `upstreamPort` | 上游 DSH。留空 / `0` 时自动读取当前实例的地址：`dsh web` 默认 3080，桌面端固定 19387 |
+| `upstreamHost` / `upstreamPort` | 上游 DSH。留空 / `0` 时自动跟随当前实例：先读 `webServer` 已绑定的端口，再退到 `webStartup`（`dsh web` 为 3080；桌面端传的是 `--port 0`，真实端口只在 `webServer` 上） |
 | `tlsEnabled` / `tlsPfxPath` / `tlsPassphrase` | TLS（pfx 证书） |
 | `logMaxBytes` / `logKeep` | `access.log` 轮转：超过上限（默认 1 MiB）就轮转，保留若干份旧文件（默认 3）；`0` 分别表示不轮转、不留历史 |
 | `updateCheck` | 检查更新（默认开）：启动几秒后和之后每 12 小时读一次 GitHub 上的版本 tag；只提示，不会自动安装 |
@@ -134,6 +135,10 @@ DSH 0.2.1 起会直接装到 1.3 上并热替换（实测从 1.3.0 升级，入�
 3. 打 tag `v1.4.1`（必须是 `v` + 三段数字）并推送：`git tag v1.4.1 && git push origin v1.4.1`。
 
 只有 `vX.Y.Z` 格式的 tag 会被当成发布；`v1.5.0-rc.1` 这类预发布不会推送给用户。每个版本的安装地址都带自己的 tag，所以 DSH 才会把它当作新版本安装到旧版本上，因此**每次发版都必须打 tag**。
+
+## 从 1.4.0 升级到 1.4.1
+
+除了更新本身不用做任何事：1.4.1 只修了上游地址的自动探测。如果状态卡的「上游」显示 `127.0.0.1:3080` 而 DSH 本身是能打开的，那就是这个 bug —— 现在会自动跟随 DSH 实际绑定的端口。入口路径、密码、白名单和已登录的设备都不受影响。
 
 ## 从 1.2 升级
 

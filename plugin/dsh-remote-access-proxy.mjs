@@ -11,9 +11,10 @@
  * - Forwards to DSH with Host rewritten to loopback and Origin stripped, so
  *   the /api trust fence accepts any front — no per-host trustedHosts needed.
  * - Forwards to the running DSH instance: `upstreamHost`/`upstreamPort` default
- *   to auto-detect from the live `webStartup` service (`dsh web` listens on
- *   3080, the desktop launcher pins 19387), so no configuration is needed;
- *   explicit values override.
+ *   to auto-detect from the live `webServer` service (the port the OS actually
+ *   bound — the desktop launcher asks for `--port 0`, so only that service knows
+ *   it), falling back to `webStartup` and then to 3080, so no configuration is
+ *   needed; explicit values override.
  * - Optional TLS (self-signed pfx): browsers require a secure context for
  *   crypto.randomUUID, so plain-HTTP remote access breaks the web client.
  * - Configured from the Plugins page: the bundle's row page (sidebar → Plugins
@@ -149,9 +150,10 @@ export const Config = z.object({
   // shown on the page; regenerating it signs every device out.
   cookieValue: z.string().default("").volatile(),
   // Upstream DSH body. Empty host / port 0 mean "follow the running instance":
-  // the address is read from the live `webStartup` service at start time, so
-  // `dsh web` (3080) and the desktop launcher (`--port 19387`) both work without
-  // configuration. An explicit value always wins.
+  // the address is read at start time from the live `webServer` service (the
+  // bound port) and then `webStartup` (the requested one), so both `dsh web` and
+  // a desktop launcher started with `--port 0` work without configuration. An
+  // explicit value always wins.
   upstreamHost: z.string().default("").volatile(),
   upstreamPort: z.number().default(0).volatile(),
   tlsEnabled: z.boolean().default(false).volatile(),
@@ -549,9 +551,13 @@ function writeLogLine(dir, line, maxBytes, keep) {
  *   session cookie, exchanged from the launch token on first need.
  * @param onUpstream401 - invoked when the upstream answers 401 to a gated
  *   request (stale DSH cookie); drop it and refresh in the background.
+ * @param getUpstream - `() => ({ host, port })`; read per request, so an
+ *   auto-detected address can still change after the OS binds its port.
  */
-function buildServer(settings, log, getDshCookie, onUpstream401, onDenied) {
-  const { secretPath, upstreamHost, upstreamPort } = settings
+function buildServer(settings, log, getDshCookie, onUpstream401, onDenied, getUpstream) {
+  const { secretPath } = settings
+  const upstreamHost = () => getUpstream().host
+  const upstreamPort = () => getUpstream().port
   /** Every live socket, both sides of a bridged websocket included, so a stop can end them all. */
   const sockets = new Set()
   const track = (socket) => {
@@ -663,7 +669,7 @@ function buildServer(settings, log, getDshCookie, onUpstream401, onDenied) {
    */
   function upstreamHeaders(req, cookie) {
     const headers = { ...req.headers }
-    headers.host = `${upstreamHost}:${upstreamPort}`
+    headers.host = `${upstreamHost()}:${upstreamPort()}`
     delete headers.origin
     if (cookie === undefined) delete headers.cookie
     else headers.cookie = cookie
@@ -691,8 +697,8 @@ function buildServer(settings, log, getDshCookie, onUpstream401, onDenied) {
     const cookie = await getDshCookie()
     const upstreamReq = http.request(
       {
-        hostname: upstreamHost,
-        port: upstreamPort,
+        hostname: upstreamHost(),
+        port: upstreamPort(),
         method: req.method,
         path: upstreamTarget(path, search),
         headers: upstreamHeaders(req, cookie),
@@ -779,8 +785,8 @@ function buildServer(settings, log, getDshCookie, onUpstream401, onDenied) {
     const target = path !== undefined ? path : url.pathname
     const cookie = await getDshCookie()
     const upstreamReq = http.request({
-      hostname: upstreamHost,
-      port: upstreamPort,
+      hostname: upstreamHost(),
+      port: upstreamPort(),
       method: req.method,
       path: upstreamTarget(target, url.search),
       headers: upstreamHeaders(req, cookie),
@@ -942,7 +948,10 @@ export function apply(ctx, config) {
       doc.scheme = scheme
       const allow = parseAllowList(settings.allowFrom)
       doc.listenPort = settings.listenPort
-      doc.upstream = `${settings.upstreamHost}:${settings.upstreamPort}`
+      // The page must show the address requests actually go to, not the one
+      // resolved at start time (an auto-detected port can still have been unbound).
+      const live = upstreamNow()
+      doc.upstream = `${live.host}:${live.port}`
       doc.tls = settings.tlsEnabled === true
       doc.password = typeof settings.password === "string" && settings.password !== ""
       doc.allowFrom = allow.bad.length === 0 ? allow.entries : []
@@ -1115,25 +1124,81 @@ export function apply(ctx, config) {
     settled.then(() => outside(write), () => outside(write))
   }
 
+  /** A port that can actually be connected to; `0` is the OS's "pick a free one". */
+  const usablePort = (value) => Number.isInteger(value) && value > 0 && value < 65536
+
+  /**
+   * The running web server, whose `port` is the port the OS really bound. The
+   * strict read is tried first; a non-strict one still answers while the
+   * `webserver` row has not reached ACTIVE, and its `port` stays `undefined`
+   * until `listen` binds — hence `usablePort` rather than a plain truthiness test.
+   */
+  function runningWebServer() {
+    return ctx.get?.("webServer") ?? ctx.get?.("webServer", false)
+  }
+
   /**
    * Resolve the upstream address this proxy fronts.
    *
    * Both fields may be left unset (empty host / port 0) to follow the running
-   * instance: the in-process web server publishes its address as `webStartup`,
-   * so `dsh web`'s `--port 3080` default and the desktop launcher's hard-coded
-   * `--port 19387` are picked up automatically. An explicit value always wins;
-   * the last resort is the historical loopback 127.0.0.1:3080.
+   * instance. The authoritative source is the `webServer` service, which
+   * publishes the port the OS actually bound; the desktop launcher passes
+   * `--port 0` ("let the OS pick one"), so its connectable port exists only
+   * there. `webStartup` carries the *requested* address instead — still 0 on the
+   * desktop, but the real port under `dsh web` — so it is the fallback. An
+   * explicit value always wins; the last resort is the historical loopback
+   * 127.0.0.1:3080.
+   *
+   * @returns `{ upstreamHost, upstreamPort, known }`, where `known` says whether
+   *   a live address was found (rather than the historical fallback).
+   * @param quiet - skip the log line; used by the per-request re-resolution,
+   *   which must not write to the log on every request.
    */
-  function resolveUpstream(settings) {
+  function resolveUpstream(settings, quiet = false) {
+    const bound = runningWebServer()
     const live = ctx.get?.("webStartup")
-    let host = settings.upstreamHost || live?.host || "127.0.0.1"
+    let host = settings.upstreamHost || bound?.host || live?.host || "127.0.0.1"
     // A bind address is not a connect address: 0.0.0.0/:: mean "every host".
     if (host === "0.0.0.0" || host === "::" || host === "[::]" || host === "*") host = "127.0.0.1"
-    const port = settings.upstreamPort || live?.port || 3080
-    if (!settings.upstreamHost || !settings.upstreamPort) {
-      log(`upstream ${host}:${port}${live === undefined ? " (webStartup unavailable, using fallback)" : " (auto)"}`)
+    const boundPort = usablePort(bound?.port) ? bound.port : undefined
+    const livePort = usablePort(live?.port) ? live.port : undefined
+    const known = Boolean(settings.upstreamPort) || boundPort !== undefined || livePort !== undefined
+    const port = settings.upstreamPort || boundPort || livePort || 3080
+    if (!quiet && (!settings.upstreamHost || !settings.upstreamPort)) {
+      log(`upstream ${host}:${port}${known ? " (auto)" : " (unavailable, using the 3080 fallback)"}`)
     }
-    return { upstreamHost: host, upstreamPort: port }
+    return { upstreamHost: host, upstreamPort: port, known }
+  }
+
+  /**
+   * The settings a resolution re-reads later, while the address is auto-detected.
+   * `undefined` once an explicit address is configured — the value is then fixed.
+   */
+  let upstreamAuto
+
+  /**
+   * The address to forward to right now.
+   *
+   * An auto-detected address is re-resolved on every request rather than fixed at
+   * start time: a `--port 0` host (the desktop launcher) publishes its bound port
+   * only after the OS has assigned one, and nothing orders the `webserver` row
+   * before this plugin's, so the value read at start time can still be the 3080
+   * fallback — which is what answered 502 bad gateway to every remote request.
+   * Re-resolving removes the start-order dependency entirely; an explicit
+   * address is never re-read.
+   */
+  function upstreamNow() {
+    if (upstreamAuto === undefined || current === undefined) {
+      return current === undefined
+        ? { host: "127.0.0.1", port: 3080 }
+        : { host: current.upstreamHost, port: current.upstreamPort }
+    }
+    const live = resolveUpstream(upstreamAuto, true)
+    if (live.known && (live.upstreamHost !== current.upstreamHost || live.upstreamPort !== current.upstreamPort)) {
+      log(`upstream ${live.upstreamHost}:${live.upstreamPort} (auto)`)
+      current = { ...current, upstreamHost: live.upstreamHost, upstreamPort: live.upstreamPort }
+    }
+    return { host: current.upstreamHost, port: current.upstreamPort }
   }
 
   function ensureSecrets(settings) {
@@ -1148,9 +1213,9 @@ export function apply(ctx, config) {
   }
 
   /** The launch token of this DSH process, read from the connection service. */
-  function launchToken(settings) {
+  function launchToken(host, port) {
     try {
-      const base = `http://${settings.upstreamHost}:${settings.upstreamPort}`
+      const base = `http://${host}:${port}`
       return new URL(ctx.connection.authenticatedUrl(base)).searchParams.get("token") || undefined
     } catch (err) {
       log(`launch token unavailable (${err.message})`)
@@ -1160,9 +1225,11 @@ export function apply(ctx, config) {
 
   /** Exchange the launch token for DSH's authority-bound session cookie. */
   function exchangeDshCookie(settings) {
-    const host = settings.upstreamHost
-    const port = settings.upstreamPort
-    const token = launchToken(settings)
+    // The cookie is fetched from the address requests actually go to: at start
+    // time an auto-detected port may not be bound yet, and an exchange that ran
+    // against the 3080 fallback would simply never produce a cookie.
+    const { host, port } = upstreamNow()
+    const token = launchToken(host, port)
     if (!token) return Promise.resolve(undefined)
     return new Promise((resolve) => {
       const req = http.request(
@@ -1270,7 +1337,15 @@ export function apply(ctx, config) {
       log("waiting for the migrated configuration before starting")
       return
     }
-    const resolved = ensureSecrets({ ...settings, ...resolveUpstream(settings) })
+    const upstream = resolveUpstream(settings)
+    // An auto-detected address stays a live query (an explicit one is fixed), so
+    // a resolution that raced the OS binding its port heals on the next request.
+    upstreamAuto = !settings.upstreamHost || !settings.upstreamPort ? settings : undefined
+    const resolved = ensureSecrets({
+      ...settings,
+      upstreamHost: upstream.upstreamHost,
+      upstreamPort: upstream.upstreamPort,
+    })
     current = resolved
     if (!resolved.enabled) {
       status = { state: "disabled" }
@@ -1285,7 +1360,7 @@ export function apply(ctx, config) {
     lastDenied = undefined
     const built = buildServer(resolved, log, getDshCookie, onUpstream401, (address) => {
       lastDenied = { address, at: new Date().toISOString() }
-    })
+    }, upstreamNow)
     if (built.error !== undefined) {
       fail(built.error, built.code)
       return

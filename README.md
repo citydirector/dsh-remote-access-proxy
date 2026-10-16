@@ -69,6 +69,7 @@ Then switch on "Enable TLS" in the page, fill in the path and passphrase, and sa
 
 - **The remote device can't connect at all** (connection reset): its address isn't in the allow list. The page shows the address it turned away; add it, or click **LAN and VPN only**.
 - **`forbidden` on the remote device**: the path is wrong. Open the full entry address again.
+- **A plain-text `bad gateway`**: the proxy could not reach the upstream DSH. The status card's **Upstream** line shows the address it is using, and `access.log` records the reason (usually `ECONNREFUSED`). Leave `upstreamHost` / `upstreamPort` at empty / `0` so the address follows the running instance. Before 1.4.1 the desktop app was unusable this way: it starts its host with `--port 0`, the plugin read the *requested* `0` from `webStartup` instead of the port the OS bound on `webServer`, and fell back to 3080.
 - **Two DSH apps sharing one `$DSH_HOME`** read the same profile and fight over one port. Switch "Enabled" off in one of them, or give each its own port.
 
 ## Security model
@@ -96,7 +97,7 @@ Every field is a `.volatile()` field of the plugin's Cordis `Config`, stored in 
 | `secretPath` | Gate path (4–32 letters, digits, `-`, `_`; generated when empty) |
 | `password` | Optional access password (empty = none) |
 | `cookieValue` | Server secret that signs remembered devices (generated; not shown on the page) |
-| `upstreamHost` / `upstreamPort` | Upstream DSH. Empty / `0` follows the running instance: 3080 for `dsh web`, 19387 for the desktop app |
+| `upstreamHost` / `upstreamPort` | Upstream DSH. Empty / `0` follows the running instance: the bound port from its `webServer` service, then `webStartup` (3080 under `dsh web`; a desktop launch passes `--port 0`, so its real port exists only on `webServer`) |
 | `tlsEnabled` / `tlsPfxPath` / `tlsPassphrase` | TLS (pfx certificate) |
 | `logMaxBytes` / `logKeep` | `access.log` rotation: rotate past the cap (default 1 MiB), keep this many old files (default 3); `0` turns rotation / history off |
 | `updateCheck` | Check for updates (default on): read the release tags on GitHub a few seconds after start and every 12 hours; it only tells you, never installs |
@@ -134,6 +135,10 @@ From DSH 0.2.1 it installs over 1.3 and hot-swaps (tested from 1.3.0: entry path
 3. Tag `v1.4.1` (exactly `v` + three numbers) and push the tag: `git tag v1.4.1 && git push origin v1.4.1`.
 
 Only `vX.Y.Z` tags count as releases; a pre-release such as `v1.5.0-rc.1` is never offered. Each release installs from its own tag, which is what lets DSH install it over the previous one — so **every release needs its tag**.
+
+## Upgrading from 1.4.0 to 1.4.1
+
+Nothing to do beyond the update itself: 1.4.1 only fixed upstream auto-detection. If the status card showed an **Upstream** of `127.0.0.1:3080` while DSH itself was reachable, that was the bug — the address now follows the port DSH actually bound. Entry paths, passwords, allow lists and signed-in devices are untouched.
 
 ## Upgrading from 1.2
 
