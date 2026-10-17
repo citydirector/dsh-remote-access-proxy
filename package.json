@@ -3,6 +3,7 @@
   "version": "1.4.1",
   "type": "module",
   "description": "Reach the DSH Web GUI from your phone or another computer: a secret-path reverse proxy with an optional password and client allow list that bridges DSH's per-start launch token, configured from its own page in the Plugins panel.",
+  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "remote-access", "reverse-proxy", "authentication"],
   "license": "MIT",
   "icon": "icon.svg",
   "repository": {
