@@ -2,13 +2,15 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
+[![Release](https://img.shields.io/github/v/tag/citydirector/dsh-remote-access-proxy?sort=semver&label=release)](https://github.com/citydirector/dsh-remote-access-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.1.7--rc.1-blue)](https://github.com/topics/dsh-plugin)
+
 Use DSH (DeepSeek Harness) from your phone, tablet, or another computer's browser.
 
 The plugin runs a small reverse proxy inside DSH. A remote device opens one address with a random path and gets the full Web GUI, without ever needing the launch token DSH changes on every start. Anything can sit in front: a LAN IP, easytier, ZeroTier, Tailscale, nginx, Caddy, Cloudflare Tunnel.
 
 Requires **DSH 0.1.7-rc.1 or newer** (tested on 0.2.0-rc.2 and 0.2.1-alpha.3).
 
-## Three steps
+## Quick start
 
 1. **Install**: sidebar **Plugins** → Add plugin, and give it
    ```
@@ -21,6 +23,14 @@ Requires **DSH 0.1.7-rc.1 or newer** (tested on 0.2.0-rc.2 and 0.2.1-alpha.3).
 Nothing needs configuring: port 13337 on every interface, with the random path generated and saved on first start. Add a password or limit who may connect whenever you like.
 
 > **Set your API key on this machine first.** Some DSH settings can only be changed from a page on the host (DSH's own rule, not this plugin's; on 0.2.0 remote pages cannot change settings at all), so set the API key in DSH on the host. Remote pages can create sessions, chat, and pick workspaces normally.
+
+From the command line:
+
+```bash
+dsh plugin --profile web add github:citydirector/dsh-remote-access-proxy
+```
+
+A git dependency is pinned to a commit by the profile's `pnpm-lock.yaml`; prefer a tag-pinned spec (`github:citydirector/dsh-remote-access-proxy#v1.4.0`). While DSH runs, update from the configuration page or the Plugins page; with DSH stopped you can also `pnpm add` the new tag in the profile directory.
 
 ## The configuration page
 
@@ -72,7 +82,7 @@ Then switch on "Enable TLS" in the page, fill in the path and passphrase, and sa
 - **A plain-text `bad gateway`**: the proxy could not reach the upstream DSH. The status card's **Upstream** line shows the address it is using, and `access.log` records the reason (usually `ECONNREFUSED`). Leave `upstreamHost` / `upstreamPort` at empty / `0` so the address follows the running instance. Before 1.4.1 the desktop app was unusable this way: it starts its host with `--port 0`, the plugin read the *requested* `0` from `webStartup` instead of the port the OS bound on `webServer`, and fell back to 3080.
 - **Two DSH apps sharing one `$DSH_HOME`** read the same profile and fight over one port. Switch "Enabled" off in one of them, or give each its own port.
 
-## Security model
+## Security
 
 Access control is entirely the proxy's gate:
 
@@ -104,8 +114,6 @@ Every field is a `.volatile()` field of the plugin's Cordis `Config`, stored in 
 
 ## Updating
 
-### One-click update (1.4+)
-
 A few seconds after start, and every 12 hours after that, the plugin reads this repository's tags on GitHub, takes the highest `vX.Y.Z` (pre-releases and other tags are ignored) and compares it with the running version. The **Version** line of the status card says **Up to date**, **vX is available**, or **Couldn't check for updates** (with the time and the reason). Offline or rate-limited checks just show as failed; the proxy is not affected. **Check now** checks again at once; turn **Check for updates** off under Advanced if you don't want it to go online.
 
 When a release is available, click **Update to vX**. The page asks DSH's own plugin manager (the same call the Plugins page installs with) to install `github:citydirector/dsh-remote-access-proxy#vX`; DSH installs it over the running version and hot-swaps it, no restart needed:
@@ -118,7 +126,13 @@ The update button is only offered on a page opened on this computer; remote page
 
 To update or roll back by hand: **Plugins** → **Add plugin**, and give it a tag-pinned spec such as `github:citydirector/dsh-remote-access-proxy#v1.4.0`. A spec without a tag, or exactly the spec already installed, is refused as already installed.
 
-### Upgrading from 1.3 to 1.4
+## Upgrading from older versions
+
+### 1.4.0 → 1.4.1
+
+Nothing to do beyond the update itself: 1.4.1 only fixed upstream auto-detection. If the status card showed an **Upstream** of `127.0.0.1:3080` while DSH itself was reachable, that was the bug — the address now follows the port DSH actually bound. Entry paths, passwords, allow lists and signed-in devices are untouched.
+
+### 1.3 → 1.4
 
 1.3 has no update button, so install 1.4.0 once by hand: **Plugins** → **Add plugin**, and give it
 
@@ -128,24 +142,12 @@ github:citydirector/dsh-remote-access-proxy#v1.4.0
 
 From DSH 0.2.1 it installs over 1.3 and hot-swaps (tested from 1.3.0: entry path, password and allow list kept). Later releases update from the configuration page. DSH 0.2.0 and older have no hot reload: `pnpm add` that spec in the profile directory, then restart DSH.
 
-### Release convention
-
-1. Bump `version` in `package.json`, e.g. `1.4.1`.
-2. Commit and push to `main`.
-3. Tag `v1.4.1` (exactly `v` + three numbers) and push the tag: `git tag v1.4.1 && git push origin v1.4.1`.
-
-Only `vX.Y.Z` tags count as releases; a pre-release such as `v1.5.0-rc.1` is never offered. Each release installs from its own tag, which is what lets DSH install it over the previous one — so **every release needs its tag**.
-
-## Upgrading from 1.4.0 to 1.4.1
-
-Nothing to do beyond the update itself: 1.4.1 only fixed upstream auto-detection. If the status card showed an **Upstream** of `127.0.0.1:3080` while DSH itself was reachable, that was the bug — the address now follows the port DSH actually bound. Entry paths, passwords, allow lists and signed-in devices are untouched.
-
-## Upgrading from 1.2
+### 1.2 → 1.3
 
 - `listenHost` is gone: the proxy now always listens on every interface, and **who** may connect is `allowFrom`. An old `listenHost` value is ignored.
 - Devices enter through the path once more after upgrading (the cookie format changed); bookmarked addresses keep working.
 
-## Upgrading from 1.1
+### 1.1 → 1.2
 
 Nothing to do:
 
@@ -153,17 +155,9 @@ Nothing to do:
 - 1.2 loads by package name. On its first start it rewrites that stale absolute path in the profile to the package name and **keeps your gate path and cookie**, so bookmarked addresses keep working.
 - The two components (proxy + page) are now one, shown in the Plugins page with a proper title and icon instead of a long `file:///…` path.
 
-### Migrating from 0.3.0
+### 0.3.0 → 1.x
 
 DSH 0.1.7 removed `settings.yaml`. Update DSH first, then the plugin, and switch it off and on. On first start DSH imports the `remote-access-proxy:` section of `data/settings.yaml` into the profile and renames the file to `settings.yaml.imported`.
-
-## Manual install / CLI
-
-```bash
-dsh plugin --profile web add github:citydirector/dsh-remote-access-proxy
-```
-
-A git dependency is pinned to a commit by the profile's `pnpm-lock.yaml`; prefer a tag-pinned spec (`github:citydirector/dsh-remote-access-proxy#v1.4.0`). While DSH runs, update from the configuration page or the Plugins page; with DSH stopped you can also `pnpm add` the new tag in the profile directory.
 
 ## Development
 
@@ -186,3 +180,21 @@ node test-remote-access-proxy.mjs   # Expected: 86 passed, 0 failed
 The tests mock a DSH upstream (launch-token exchange + `dsh-auth` cookie gate) and the host contract the plugin relies on, and cover the gate, cookie injection, token stripping, 303 rewrite, 401 self-heal, WS upgrade, log rotation, secret generation and write-back, the status route, failure reasons (invalid path, busy port, bad allow-list entry), the password sign-in (deep links, lockout, logout, revocation), the allow list (drop, loopback, reporting), the 1.1 → 1.2 migration, upstream auto-detect, the update check (tag filtering, version comparison, failures and rate limits, the switch, check now), closing every connection on a hot swap and rebinding the port at once, and the package layout.
 
 The tests check for updates against a mock GitHub only. To rehearse a release in a real DSH, start DSH with `DSH_RAP_UPDATE_SOURCE` pointing elsewhere: `owner/repo` (another GitHub repository) or any git URL (for example a local bare repository with tags, `git+file:///path/to/repo.git`). The update button then installs `<source>#<tag>`.
+
+### Release convention
+
+1. Bump `version` in `package.json`, e.g. `1.4.1`.
+2. Commit and push to `main`.
+3. Tag `v1.4.1` (exactly `v` + three numbers) and push the tag: `git tag v1.4.1 && git push origin v1.4.1`.
+
+Only `vX.Y.Z` tags count as releases; a pre-release such as `v1.5.0-rc.1` is never offered. Each release installs from its own tag, which is what lets DSH install it over the previous one — so **every release needs its tag**.
+
+## Related projects
+
+- [deepinfra-fusion-proxy](https://github.com/citydirector/deepinfra-fusion-proxy): DeepInfra Standard / Flex switching with automatic fallback, per session
+- [dsh-loop-rescue](https://github.com/citydirector/dsh-loop-rescue): Cut model repetition loops mid-stream, prune them from the log, and resume
+- [dsh-session-manager](https://github.com/citydirector/dsh-session-manager): Offline session manager: upgrade, archive, trash, loop cleanup, broken-tail repair
+
+## License
+
+[MIT](LICENSE)
