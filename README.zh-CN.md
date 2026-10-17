@@ -2,13 +2,15 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
+[![Release](https://img.shields.io/github/v/tag/citydirector/dsh-remote-access-proxy?sort=semver&label=release)](https://github.com/citydirector/dsh-remote-access-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.1.7--rc.1-blue)](https://github.com/topics/dsh-plugin)
+
 在手机、平板或另一台电脑上用浏览器使用 DSH（DeepSeek Harness）。
 
 插件在 DSH 里起一个小型反向代理：远程设备只要打开一个带随机路径的地址，就能用完整的 Web GUI，不用知道 DSH 每次启动都会变的 launch token。前面接什么都行：局域网 IP、easytier、ZeroTier、Tailscale、nginx、Caddy、Cloudflare Tunnel。
 
 需要 **DSH 0.1.7-rc.1 或更新**（已在 0.2.0-rc.2 和 0.2.1-alpha.3 上实测）。
 
-## 三步用起来
+## 快速开始
 
 1. **安装**：侧边栏 **插件** → 添加插件，填入
    ```
@@ -21,6 +23,14 @@
 默认什么都不用配：端口 13337、监听所有网卡、随机路径首次启动自动生成并保存。需要时再加访问密码，或限制哪些设备能连。
 
 > **先在本机配好 API Key。** DSH 的部分设置只能在本机页面修改（这是 DSH 自己的规则，不是插件限制；0.2.0 上远程页面完全不能改设置），所以 API Key 等要在本机的 DSH 里填。远程页面可以正常新建会话、聊天、选择工作区。
+
+命令行安装：
+
+```bash
+dsh plugin --profile web add github:citydirector/dsh-remote-access-proxy
+```
+
+git 依赖由 profile 的 `pnpm-lock.yaml` 钉在某个提交上。命令行安装建议直接带 tag（`github:citydirector/dsh-remote-access-proxy#v1.4.0`）。DSH 运行中请用配置页或插件页更新；DSH 没有运行时，也可以在 profile 目录里用新的 tag 再执行一次 `pnpm add`。
 
 ## 配置页
 
@@ -72,7 +82,7 @@ openssl pkcs12 -export -inkey key.pem -in cert.pem -out dsh-proxy.pfx -passout p
 - **页面只有一行纯文本 `bad gateway`**：代理连不上上游 DSH。状态卡的「上游」一行显示它正在用的地址，`access.log` 里记着原因（通常是 `ECONNREFUSED`）。把 `upstreamHost` / `upstreamPort` 留空 / `0`，让地址自动跟随当前实例。1.4.1 之前的桌面端必然踩这个坑：桌面启动器传的是 `--port 0`，而插件读的是 `webStartup` 上那个**请求值** `0`，没读 `webServer` 实际绑定的端口，于是掉到 3080。
 - **两个 DSH 共用一个 `$DSH_HOME`**：它们读同一份 profile，会抢同一个端口。在其中一个的配置页关掉「启用」，或者给两边设不同的端口。
 
-## 安全模型
+## 安全
 
 访问控制完全由代理的门禁承担：
 
@@ -85,7 +95,7 @@ openssl pkcs12 -export -inkey key.pem -in cert.pem -out dsh-proxy.pfx -passout p
 
 随机路径就是钥匙：把入口地址当密码对待。`access.log` 的启动行也会记录它。
 
-## 配置项
+## 配置
 
 所有字段都是插件 Cordis `Config` 的 `.volatile()` 字段，保存在当前 profile 的 `cordis.patch.yml` 里。可以在配置页修改，也可以参照 [`config/cordis.patch.example.yml`](config/cordis.patch.example.yml) 手动编辑。
 
@@ -104,8 +114,6 @@ openssl pkcs12 -export -inkey key.pem -in cert.pem -out dsh-proxy.pfx -passout p
 
 ## 更新
 
-### 一键更新（1.4 起）
-
 插件启动几秒后，以及之后每 12 小时，会读一次本仓库在 GitHub 上的 tag，取最大的 `vX.Y.Z`（忽略预发布和其它 tag），和当前版本比较。结果显示在配置页状态卡的「版本」一行：**已是最新** / **有新版本 vX** / **检查更新失败**（带检查时间和原因）。断网或 GitHub 限流时只是显示失败，不影响代理。「立即检查」可以马上再查一次；不想联网检查可以在「高级」里关掉「检查更新」。
 
 有新版本时点 **更新到 vX**。插件通过 DSH 自己的插件管理（和「插件」页安装用的是同一个接口）安装 `github:citydirector/dsh-remote-access-proxy#vX`，DSH 会把它装到当前版本上并热替换，不用重启：
@@ -118,7 +126,13 @@ openssl pkcs12 -export -inkey key.pem -in cert.pem -out dsh-proxy.pfx -passout p
 
 手动更新或回退也可以：**插件** → **添加插件**，填入 `github:citydirector/dsh-remote-access-proxy#v1.4.0` 这种带 tag 的地址。不带 tag、或者和已装的写法完全相同的地址，DSH 会提示「已经安装」。
 
-### 从 1.3 升级到 1.4
+## 从旧版本升级
+
+### 1.4.0 → 1.4.1
+
+除了更新本身不用做任何事：1.4.1 只修了上游地址的自动探测。如果状态卡的「上游」显示 `127.0.0.1:3080` 而 DSH 本身是能打开的，那就是这个 bug —— 现在会自动跟随 DSH 实际绑定的端口。入口路径、密码、白名单和已登录的设备都不受影响。
+
+### 1.3 → 1.4
 
 1.3 还没有更新按钮，需要手动装一次：**插件** → **添加插件**，填入
 
@@ -128,24 +142,12 @@ github:citydirector/dsh-remote-access-proxy#v1.4.0
 
 DSH 0.2.1 起会直接装到 1.3 上并热替换（实测从 1.3.0 升级，入口、密码、白名单都保留）。以后的版本就可以在配置页一键更新了。DSH 0.2.0 及更早没有热重载，按旧方式在 profile 目录里 `pnpm add` 这个地址后重启 DSH。
 
-### 发版约定
-
-1. 改 `package.json` 的 `version`，例如 `1.4.1`。
-2. 提交并推送到 `main`。
-3. 打 tag `v1.4.1`（必须是 `v` + 三段数字）并推送：`git tag v1.4.1 && git push origin v1.4.1`。
-
-只有 `vX.Y.Z` 格式的 tag 会被当成发布；`v1.5.0-rc.1` 这类预发布不会推送给用户。每个版本的安装地址都带自己的 tag，所以 DSH 才会把它当作新版本安装到旧版本上，因此**每次发版都必须打 tag**。
-
-## 从 1.4.0 升级到 1.4.1
-
-除了更新本身不用做任何事：1.4.1 只修了上游地址的自动探测。如果状态卡的「上游」显示 `127.0.0.1:3080` 而 DSH 本身是能打开的，那就是这个 bug —— 现在会自动跟随 DSH 实际绑定的端口。入口路径、密码、白名单和已登录的设备都不受影响。
-
-## 从 1.2 升级
+### 1.2 → 1.3
 
 - 去掉了 `listenHost`：代理现在固定监听所有网卡，**谁能连**由 `allowFrom` 决定。旧的 `listenHost` 值会被忽略。
 - 升级后各设备需要从入口重新进入一次（Cookie 格式变了），已收藏的地址照常可用。
 
-## 从 1.1 升级
+### 1.1 → 1.2
 
 升级后直接用，不用做任何事：
 
@@ -153,19 +155,11 @@ DSH 0.2.1 起会直接装到 1.3 上并热替换（实测从 1.3.0 升级，入�
 - 1.2 改为按包名加载。首次启动时插件会把 profile 里这条旧的绝对路径改写成包名，**原来的随机路径和 Cookie 保持不变**，已经收藏的地址继续可用。
 - 原来的两个组件（代理 + 配置页）合并成了一个，插件页显示的是正常的标题和图标，而不是一长串 `file:///…` 路径。
 
-### 从 0.3.0 迁移
+### 0.3.0 → 1.x
 
 DSH 0.1.7 移除了 `settings.yaml`。先升级 DSH，再更新插件并重新打开开关。首次启动时，DSH 会把 `data/settings.yaml` 里 `remote-access-proxy:` 这一节导入 profile，并把原文件改名为 `settings.yaml.imported`。
 
-## 手动安装 / 命令行
-
-```bash
-dsh plugin --profile web add github:citydirector/dsh-remote-access-proxy
-```
-
-git 依赖由 profile 的 `pnpm-lock.yaml` 钉在某个提交上。命令行安装建议直接带 tag（`github:citydirector/dsh-remote-access-proxy#v1.4.0`）。DSH 运行中请用配置页或插件页更新；DSH 没有运行时，也可以在 profile 目录里用新的 tag 再执行一次 `pnpm add`。
-
-## 开发
+## 开发与测试
 
 ```
 dsh-remote-access-proxy/
@@ -186,3 +180,21 @@ node test-remote-access-proxy.mjs   # 期望：86 passed, 0 failed
 测试会模拟 DSH 上游（launch token 交换 + `dsh-auth` Cookie 门禁）以及插件依赖的宿主契约，覆盖：门禁、Cookie 注入、token 剥离、303 改写、401 自愈、WS 升级、日志轮转、密钥生成与写回、状态接口、错误原因（非法路径、端口占用、白名单写法错误）、密码登录（深链接、锁定、退出、失效）、来源白名单（断开、回环、上报）、1.1 → 1.2 迁移、上游自动探测、检查更新（tag 过滤、版本比较、失败与限流、开关、立即检查）、热替换时关闭全部连接并立即重新绑定端口，以及包结构。
 
 测试里检查更新只连本地模拟的 GitHub。要在真实 DSH 里演练一次发版，可以设置环境变量 `DSH_RAP_UPDATE_SOURCE` 指向别的来源再启动 DSH：`owner/repo`（另一个 GitHub 仓库）或任意 git 地址（例如带 tag 的本地裸仓库 `git+file:///path/to/repo.git`）。配置页的更新按钮会安装 `<来源>#<tag>`。
+
+### 发版约定
+
+1. 改 `package.json` 的 `version`，例如 `1.4.1`。
+2. 提交并推送到 `main`。
+3. 打 tag `v1.4.1`（必须是 `v` + 三段数字）并推送：`git tag v1.4.1 && git push origin v1.4.1`。
+
+只有 `vX.Y.Z` 格式的 tag 会被当成发布；`v1.5.0-rc.1` 这类预发布不会推送给用户。每个版本的安装地址都带自己的 tag，所以 DSH 才会把它当作新版本安装到旧版本上，因此**每次发版都必须打 tag**。
+
+## 相关项目
+
+- [deepinfra-fusion-proxy](https://github.com/citydirector/deepinfra-fusion-proxy)：DeepInfra Standard / Flex 按会话切换与自动回退
+- [dsh-loop-rescue](https://github.com/citydirector/dsh-loop-rescue)：模型复读时从流内切断、剪掉循环并自动续跑
+- [dsh-session-manager](https://github.com/citydirector/dsh-session-manager)：离线会话管理器，可升级、归档、清洗循环、修复烂尾会话
+
+## 许可证
+
+[MIT](LICENSE)
