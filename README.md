@@ -2,17 +2,19 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![Release](https://img.shields.io/github/v/tag/citydirector/dsh-remote-access-proxy?sort=semver&label=release)](https://github.com/citydirector/dsh-remote-access-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.2--alpha.2-blue)](https://github.com/topics/dsh-plugin)
+[![Release](https://img.shields.io/github/v/tag/citydirector/dsh-remote-access-proxy?sort=semver&label=release)](https://github.com/citydirector/dsh-remote-access-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
 
 Use DSH (DeepSeek Harness) from your phone, tablet, or another computer's browser.
 
 The plugin runs a small reverse proxy inside DSH. A remote device opens one address with a random path and gets the full Web GUI, without ever needing the launch token DSH changes on every start. Anything can sit in front: a LAN IP, easytier, ZeroTier, Tailscale, nginx, Caddy, Cloudflare Tunnel.
 
-Requires **DSH 0.2.2-alpha.2 or newer 0.2.x**.
+Requires **DSH 0.2.1-rc.2 or newer 0.2.x**.
 
 ## npm installation and updates
 
-Requires DSH 0.2.2-alpha.2 or a newer 0.2.x and Node.js 24.9+. Enter `dsh-remote-access-proxy` in **Plugins → Add plugin**, or run:
+The plugin runs on DSH 0.2.1, including 0.2.1-rc.3. Use the Plugins page version list when your DSH provides it. Otherwise, stop DSH and run `dsh plugin --profile web add dsh-remote-access-proxy@latest` (use `desktop` instead of `web` for Desktop), then restart. GitHub Actions publishing does not require an alpha DSH runtime.
+
+Requires DSH 0.2.1-rc.2 or a newer 0.2.x and Node.js 24.9+. Enter `dsh-remote-access-proxy` in **Plugins → Add plugin**, or run:
 
 ```sh
 dsh plugin --profile web add dsh-remote-access-proxy

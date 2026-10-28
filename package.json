@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-access-proxy",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "type": "module",
   "description": "Reach the DSH Web GUI from your phone or another computer: a secret-path reverse proxy with an optional password and client allow list that bridges DSH's per-start launch token, configured from its own page in the Plugins panel.",
   "keywords": [
@@ -48,11 +48,11 @@
     }
   },
   "engines": {
-    "dsh": ">=0.2.2-alpha.2 <0.3.0",
+    "dsh": ">=0.2.1-rc.2 <0.3.0",
     "node": ">=24.9.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh": ">=0.2.2-alpha.2 <0.3.0"
+    "@deepseek-ai/dsh": ">=0.2.1-rc.2 <0.3.0 || >=0.2.2-alpha.2 <0.3.0"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "^3.18.4"
@@ -63,6 +63,9 @@
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
-    "test": "node test-remote-access-proxy.mjs"
+    "test": "node test-remote-access-proxy.mjs && node --test test/compatibility.spec.mjs"
+  },
+  "devDependencies": {
+    "semver": "^7.8.5"
   }
 }

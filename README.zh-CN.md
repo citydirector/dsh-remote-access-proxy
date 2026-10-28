@@ -2,7 +2,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![Release](https://img.shields.io/github/v/tag/citydirector/dsh-remote-access-proxy?sort=semver&label=release)](https://github.com/citydirector/dsh-remote-access-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.2--alpha.2-blue)](https://github.com/topics/dsh-plugin)
+[![Release](https://img.shields.io/github/v/tag/citydirector/dsh-remote-access-proxy?sort=semver&label=release)](https://github.com/citydirector/dsh-remote-access-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
 
 在手机、平板或另一台电脑上用浏览器使用 DSH（DeepSeek Harness）。
 
@@ -12,7 +12,9 @@
 
 ## npm 安装与更新
 
-需要 DSH 0.2.2-alpha.2 或更新的 0.2.x，以及 Node.js 24.9+。在 DSH「插件 → 添加插件」输入 `dsh-remote-access-proxy`，或运行：
+插件本身兼容 DSH 0.2.1（包括 0.2.1-rc.3）。若当前 DSH 提供 npm 版本列表，请在插件页更新；否则关闭 DSH 后运行 `dsh plugin --profile web add dsh-remote-access-proxy@latest`（桌面版将 `web` 换成 `desktop`），再重启。GitHub Actions 自动发包不要求升级 DSH 到 alpha 版本。
+
+需要 DSH 0.2.1-rc.2 或更新的 0.2.x，以及 Node.js 24.9+。在 DSH「插件 → 添加插件」输入 `dsh-remote-access-proxy`，或运行：
 
 ```sh
 dsh plugin --profile web add dsh-remote-access-proxy
