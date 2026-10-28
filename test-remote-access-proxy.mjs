@@ -59,11 +59,6 @@ function logSize(suffix = "") {
   }
 }
 const LAUNCH_TOKEN = "TEST_LAUNCH_TOKEN_0123456789abcdef0123456789abcdef"
-// The update check must never reach the real GitHub from the harness: every
-// instance checks a mock tag list (or never, until a test asks).
-process.env.DSH_RAP_UPDATE_API = "http://127.0.0.1:9"
-process.env.DSH_RAP_UPDATE_DELAY_MS = "600000"
-delete process.env.DSH_RAP_UPDATE_SOURCE
 /** Profile entry id the bundle mounts the host plugin as; also its settings namespace. */
 const ROW_ID = "remote-access-proxy"
 /** Bundle package name (the row page key is `<package>#<row id>`). */
@@ -511,8 +506,13 @@ async function main() {
   check("an invalid gate path is refused with a reason", status?.state === "error" && status.code === "bad-secret-path", JSON.stringify(status))
   badCtx._disposeAll()
 
+  // Reserve the same dual-stack wildcard address as the real listener.
+  // Windows may allow a wildcard listener alongside an IPv4-only fixture.
+  const blocker = http.createServer()
+  await new Promise(resolve => blocker.listen(0, "::", resolve))
+  const busyPort = blocker.address().port
   const busyCtx = createCtx(
-    { ...ctx2._state, enabled: true, listenPort: mock.port, secretPath: "abcd1234", cookieValue: "validcookie123" },
+    { ...ctx2._state, enabled: true, listenPort: busyPort, secretPath: "abcd1234", cookieValue: "validcookie123" },
     connection,
   )
   plugin.apply(busyCtx, busyCtx._refs)
@@ -523,8 +523,9 @@ async function main() {
     status = await readStatus()
     if (status?.state === "error") break
   }
-  check("a busy port is reported, not swallowed", status?.state === "error" && status.code === "port-in-use" && status.listenPort === mock.port, JSON.stringify(status))
+  check("a busy port is reported, not swallowed", status?.state === "error" && status.code === "port-in-use" && status.listenPort === busyPort, JSON.stringify(status))
   busyCtx._disposeAll()
+  await new Promise(resolve => blocker.close(resolve))
 
   // 8a') migration from the pre-1.2 row: the user patch names the module by an
   //      absolute file URL (copied there by the configuration editor). It must be
@@ -916,110 +917,24 @@ async function main() {
       && !clientSource.includes("entry.spec.kind")
       && clientSource.includes('"' + plugin.STATUS_ROUTE.slice(1) + '"'),
   )
-  // ---- 1.4: update check, one-click update, clean hot swap ------------------
-  check(
-    "release tags: only vX.Y.Z counts, highest by semantic version",
-    plugin.latestRelease(["v1.3.0", "v1.10.0", "v1.9.9", "v2.0.0-rc.1", "1.11.0", "latest", "v1.4", "v01.2.3", "v3.0.0+build"]) === "v1.10.0"
-      && plugin.latestRelease(["nightly", "v2.0.0-beta.1"]) === undefined
-      && plugin.latestRelease([]) === undefined,
-  )
-  check(
-    "version comparison is numeric, not textual",
-    plugin.compareVersions("1.10.0", "v1.9.0") > 0 && plugin.compareVersions("v1.4.0", "1.4.0") === 0
-      && plugin.compareVersions("1.3.9", "1.4.0") < 0 && plugin.compareVersions("2.0.0", "1.99.99") > 0
-      && plugin.compareVersions("garbage", "0.0.1") < 0,
-  )
-  check(
-    "the verdict offers only a newer release",
-    plugin.updateVerdict(["v1.3.0", "v1.4.1"], "1.4.0").state === "available"
-      && plugin.updateVerdict(["v1.3.0", "v1.4.1"], "1.4.0").latest === "v1.4.1"
-      && plugin.updateVerdict(["v1.3.0", "v1.4.0"], "1.4.0").state === "current"
-      && plugin.updateVerdict(["v1.5.0-rc.1"], "1.4.0").state === "current"
-      && plugin.updateVerdict([], "1.4.0").state === "current",
-  )
-  const ghSource = plugin.updateSource({})
-  const ownSource = plugin.updateSource({ DSH_RAP_UPDATE_SOURCE: "someone/fork" })
-  const gitSource = plugin.updateSource({ DSH_RAP_UPDATE_SOURCE: "git+file:///tmp/rap.git" })
-  check(
-    "releases install as tag-pinned specs from the GitHub repository (overridable)",
-    ghSource.kind === "github" && ghSource.repository === "citydirector/dsh-remote-access-proxy"
-      && plugin.releaseSpec(ghSource, "v1.4.1") === "github:citydirector/dsh-remote-access-proxy#v1.4.1"
-      && plugin.releaseSpec(ownSource, "v2.0.0") === "github:someone/fork#v2.0.0"
-      && gitSource.kind === "git" && gitSource.url === "file:///tmp/rap.git"
-      && plugin.releaseSpec(gitSource, "v1.4.1") === "git+file:///tmp/rap.git#v1.4.1"
-      && plugin.updateSource({ DSH_RAP_UPDATE_SOURCE: "not a source" }).repository === "citydirector/dsh-remote-access-proxy",
-  )
-  check("Config has an updateCheck switch, on by default", defaults.updateCheck?.get?.() === true && dict.updateCheck?.meta?.volatile === true)
-
-  // A mock GitHub tags API: the answer is switchable per test.
-  let ghAnswer = { status: 200, body: [{ name: "v0.9.0" }, { name: "v99.1.0" }, { name: "v99.2.0-rc.1" }, { name: "nightly" }] }
-  const ghRequests = []
-  const gh = http.createServer((req, res) => {
-    ghRequests.push({ url: req.url, ua: req.headers["user-agent"], accept: req.headers.accept })
-    res.writeHead(ghAnswer.status, { "content-type": "application/json" })
-    res.end(JSON.stringify(ghAnswer.body))
-  })
-  await new Promise((resolve) => gh.listen(0, "127.0.0.1", resolve))
-  process.env.DSH_RAP_UPDATE_API = `http://127.0.0.1:${gh.address().port}`
-  process.env.DSH_RAP_UPDATE_DELAY_MS = "30"
   const upMock = await createMockDsh()
   const upRoutes = new Map()
   const upConnection = {
     authenticatedUrl: connection.authenticatedUrl,
     fetch: { register(route) { upRoutes.set(route.path, route); return () => upRoutes.delete(route.path) } },
   }
-  const upStatus = async (method = "GET") => {
-    const route = upRoutes.get(method === "GET" ? plugin.STATUS_ROUTE : plugin.UPDATE_CHECK_ROUTE)
+  const upStatus = async () => {
+    const route = upRoutes.get(plugin.STATUS_ROUTE)
     if (route === undefined) return undefined
-    return await (await route.fetch(new Request("http://127.0.0.1/x", { method }))).json()
+    return await (await route.fetch(new Request("http://127.0.0.1/x"))).json()
   }
   const upPort = await freePort()
-  const upState = { ...ctx2._state, enabled: true, listenPort: upPort, secretPath: "upgate1234", cookieValue: "upsecret12345", password: "", allowFrom: "", upstreamHost: "127.0.0.1", upstreamPort: upMock.port, updateCheck: true }
+  const upState = { ...ctx2._state, enabled: true, listenPort: upPort, secretPath: "upgate1234", cookieValue: "upsecret12345", password: "", allowFrom: "", upstreamHost: "127.0.0.1", upstreamPort: upMock.port }
   let upCtx = createCtx(upState, upConnection)
   plugin.apply(upCtx, upCtx._refs)
   let up = await upStatus()
-  check("status carries the running version and a pending check", up?.version === layout.pkg.version && up?.update?.state === "pending", JSON.stringify(up?.update))
-  await sleep(300)
-  up = await upStatus()
-  check(
-    "a newer release is reported with its tag-pinned spec",
-    up?.update?.state === "available" && up.update.latest === "v99.1.0"
-      && up.update.spec === "github:citydirector/dsh-remote-access-proxy#v99.1.0"
-      && up.update.currentSpec === `github:citydirector/dsh-remote-access-proxy#v${layout.pkg.version}`
-      && typeof up.update.checkedAt === "string",
-    JSON.stringify(up?.update),
-  )
-  check(
-    "the check reads the repository's tag list once, as a named client",
-    ghRequests.length === 1 && ghRequests[0].url === "/repos/citydirector/dsh-remote-access-proxy/tags?per_page=100" && ghRequests[0].ua === "dsh-remote-access-proxy",
-    JSON.stringify(ghRequests),
-  )
-  ghAnswer = { status: 403, body: { message: "API rate limit exceeded" } }
-  up = await upStatus("POST")
-  check(
-    "a failed check is reported (with time and reason) and keeps the known release",
-    up?.update?.state === "failed" && /rate limit/i.test(up.update.error) && typeof up.update.checkedAt === "string"
-      && up.update.latest === "v99.1.0" && up.update.stale === "available",
-    JSON.stringify(up?.update),
-  )
-  ghAnswer = { status: 200, body: [{ name: `v${layout.pkg.version}` }, { name: "v0.1.0" }] }
-  up = await upStatus("POST")
-  check("\"check now\" answers with the fresh verdict: up to date", up?.update?.state === "current" && ghRequests.length === 3, JSON.stringify(up?.update))
-  // Offline: nothing listens on the API port.
-  const deadPort = await freePort()
-  process.env.DSH_RAP_UPDATE_API = `http://127.0.0.1:${deadPort}`
-  up = await upStatus("POST")
-  check("offline fails quietly with a reason", up?.update?.state === "failed" && typeof up.update.error === "string" && up.state === "listening", JSON.stringify(up?.update))
-  process.env.DSH_RAP_UPDATE_API = `http://127.0.0.1:${gh.address().port}`
-  upCtx._commit({ updateCheck: false })
-  await sleep(100)
-  const before = ghRequests.length
-  up = await upStatus("POST")
-  check("updateCheck=false turns checking off", up?.update?.state === "off" && up.updateCheck === false && ghRequests.length === before, JSON.stringify(up?.update))
-  upCtx._commit({ updateCheck: true })
-  await sleep(300)
-  up = await upStatus()
-  check("turning it back on checks again", up?.update?.state === "current", JSON.stringify(up?.update))
+  check("status carries the running version without a private updater", up?.version === layout.pkg.version && up.update === undefined && !upRoutes.has("/api/remote-access-proxy/update-check"))
+  await sleep(150)
 
   // A hot swap disposes this instance and starts the new version on the same
   // port at once: dispose must end the listener and every connection.
@@ -1059,18 +974,7 @@ async function main() {
   upCtx._disposeAll()
   keepAlive.destroy()
   upMock.server.close()
-  gh.close()
-  process.env.DSH_RAP_UPDATE_DELAY_MS = "600000"
 
-  check(
-    "the browser half installs through DSH's plugin manager, only on this machine",
-    clientSource.includes("remote.pluginManager")
-      && clientSource.includes("installBundle(spec")
-      && clientSource.includes("waitForInstall")
-      && clientSource.includes("isLoopback")
-      && clientSource.includes('"' + plugin.UPDATE_CHECK_ROUTE.slice(1) + '"')
-      && ["no-hmr", "package-moved", "host-module", "unmanaged-plugin", "module-comparison"].every((reason) => clientSource.split(`"${reason}"`).length === 3),
-  )
   check(
     "every Config field is editable in the browser half",
     fields.every((field) => clientSource.includes(`"${field}"`)),
