@@ -2,25 +2,13 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![Release](https://img.shields.io/github/v/tag/citydirector/dsh-remote-access-proxy?sort=semver&label=release)](https://github.com/citydirector/dsh-remote-access-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
+[![npm](https://img.shields.io/npm/v/dsh-remote-access-proxy)](https://www.npmjs.com/package/dsh-remote-access-proxy) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
 
 Use DSH (DeepSeek Harness) from your phone, tablet, or another computer's browser.
 
 The plugin runs a small reverse proxy inside DSH. A remote device opens one address with a random path and gets the full Web GUI, without ever needing the launch token DSH changes on every start. Anything can sit in front: a LAN IP, easytier, ZeroTier, Tailscale, nginx, Caddy, Cloudflare Tunnel.
 
-Requires **DSH 0.2.1-rc.2 or newer 0.2.x**.
-
-## npm installation and updates
-
-The plugin runs on DSH 0.2.1, including 0.2.1-rc.3. Use the Plugins page version list when your DSH provides it. Otherwise, stop DSH and run `dsh plugin --profile web add dsh-remote-access-proxy@latest` (use `desktop` instead of `web` for Desktop), then restart. GitHub Actions publishing does not require an alpha DSH runtime.
-
-Requires DSH 0.2.1-rc.2 or a newer 0.2.x and Node.js 24.9+. Enter `dsh-remote-access-proxy` in **Plugins → Add plugin**, or run:
-
-```sh
-dsh plugin --profile web add dsh-remote-access-proxy
-```
-
-For an existing GitHub installation, back up the profile's `cordis.patch.yml`, remove the old package in Plugins, and add the npm package above in the same profile. Keep the configuration row IDs and verify the saved settings after reinstalling. Subsequent updates use DSH's version list and update operation. The plugin no longer polls GitHub or provides its own install/rollback buttons; an old `updateCheck` setting has no effect.
+Requires **DSH >=0.2.1-rc.2 <0.3.0** and **Node.js 24.9+**.
 
 ## Quick start
 
@@ -34,13 +22,15 @@ For an existing GitHub installation, back up the profile's `cordis.patch.yml`, r
 
 Nothing needs configuring: port 13337 on every interface, with the random path generated and saved on first start. Add a password or limit who may connect whenever you like.
 
-> **Set your API key on this machine first.** Some DSH settings can only be changed from a page on the host (DSH's own rule, not this plugin's; on 0.2.0 remote pages cannot change settings at all), so set the API key in DSH on the host. Remote pages can create sessions, chat, and pick workspaces normally.
+> **Set your API key on this machine first.** Some DSH settings can only be changed from a page on the host (subject to DSH’s own remote-access policy), so set the API key in DSH on the host. Remote pages can create sessions, chat, and pick workspaces normally.
 
 From the command line:
 
 ```bash
 dsh plugin --profile web add dsh-remote-access-proxy
 ```
+
+Stop the corresponding DSH instance before CLI changes and restart afterwards. Prefer the Plugins page on Desktop; its desktop profile requires that installation’s CLI and the same DSH_HOME.
 
 ## The configuration page
 
@@ -53,13 +43,13 @@ dsh plugin --profile web add dsh-remote-access-proxy
 - **Regenerate the entry path**: after saving, the old address stops working — use it if the address may have leaked.
 - On/off settings are switches. A save applies at once: the proxy restarts in place, DSH does not.
 
-On DSH 0.2.0 the page appears on the host only; from 0.2.1 remote pages can open it too, but **one-click updates are offered on the host only**.
+Access to host settings depends on the DSH version and its remote-access policy. Plugin updates are managed from DSH’s Plugins page.
 
 ## Do I need TLS?
 
 No. DSH 0.2 works over plain http.
 
-- **VPN / home LAN**: http is fine; the traffic is already on a private network.
+- **VPN / home LAN**: HTTP is available, but does not encrypt traffic. Use HTTPS on untrusted networks; a VPN may provide a separate encrypted transport.
 - **Internet**: turn TLS on, or put the proxy behind an HTTPS reverse proxy (Caddy, nginx, Cloudflare Tunnel).
 
 TLS needs a `.pfx` certificate. A self-signed one on Windows (PowerShell):
@@ -123,11 +113,17 @@ Every field is a `.volatile()` field of the plugin's Cordis `Config`, stored in 
 
 ## Updating
 
-Use the DSH Plugins page to list npm versions and apply a compatible update. The plugin no longer checks GitHub or performs its own installation. See [PUBLISHING.md](PUBLISHING.md) for automatic publishing.
+Updates use npm and DSH’s installer. Use the Plugins page version list when your host provides it. Otherwise stop DSH and run:
+
+~~~sh
+dsh plugin --profile web add dsh-remote-access-proxy@latest
+~~~
+
+The plugin’s GitHub polling and private update buttons have been removed; the old updateCheck setting has no effect. Maintainer publishing instructions are in [PUBLISHING.md](PUBLISHING.md).
 
 ## Upgrading from older versions
 
-Follow the npm migration instructions above. Keep the same profile and row IDs; the proxy heals old absolute module paths at startup.
+To migrate a GitHub dependency, back up the profile’s cordis.patch.yml, remove the old package and add dsh-remote-access-proxy by its npm name. Keep row IDs and verify saved settings afterwards.
 
 ## Development
 

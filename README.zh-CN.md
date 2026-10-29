@@ -2,25 +2,13 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![Release](https://img.shields.io/github/v/tag/citydirector/dsh-remote-access-proxy?sort=semver&label=release)](https://github.com/citydirector/dsh-remote-access-proxy/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
+[![npm](https://img.shields.io/npm/v/dsh-remote-access-proxy)](https://www.npmjs.com/package/dsh-remote-access-proxy) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
 
 在手机、平板或另一台电脑上用浏览器使用 DSH（DeepSeek Harness）。
 
 插件在 DSH 里起一个小型反向代理：远程设备只要打开一个带随机路径的地址，就能用完整的 Web GUI，不用知道 DSH 每次启动都会变的 launch token。前面接什么都行：局域网 IP、easytier、ZeroTier、Tailscale、nginx、Caddy、Cloudflare Tunnel。
 
-需要 **DSH 0.1.7-rc.1 或更新**（已在 0.2.0-rc.2 和 0.2.1-alpha.3 上实测）。
-
-## npm 安装与更新
-
-插件本身兼容 DSH 0.2.1（包括 0.2.1-rc.3）。若当前 DSH 提供 npm 版本列表，请在插件页更新；否则关闭 DSH 后运行 `dsh plugin --profile web add dsh-remote-access-proxy@latest`（桌面版将 `web` 换成 `desktop`），再重启。GitHub Actions 自动发包不要求升级 DSH 到 alpha 版本。
-
-需要 DSH 0.2.1-rc.2 或更新的 0.2.x，以及 Node.js 24.9+。在 DSH「插件 → 添加插件」输入 `dsh-remote-access-proxy`，或运行：
-
-```sh
-dsh plugin --profile web add dsh-remote-access-proxy
-```
-
-旧版从 GitHub 安装的用户：先备份 profile 的 `cordis.patch.yml`，在插件页移除旧包并用上述 npm 包名重新添加，保持原 profile 与配置行 ID。配置仍由 profile 保存；重新添加后检查已保存的值。此后统一使用 DSH 插件页的版本列表与更新功能。插件不再轮询 GitHub、不再提供独立安装或回退按钮，旧 `updateCheck` 设置不再生效。
+需要 **DSH >=0.2.1-rc.2 <0.3.0** 与 **Node.js 24.9+**。
 
 ## 快速开始
 
@@ -42,6 +30,8 @@ dsh plugin --profile web add dsh-remote-access-proxy
 dsh plugin --profile web add dsh-remote-access-proxy
 ```
 
+命令行操作前关闭对应的 DSH 实例，完成后重启。Desktop 用户优先使用插件页；管理 desktop profile 时使用该桌面安装自带的 CLI 和相同的 DSH_HOME。
+
 git 依赖由 profile 的 `pnpm-lock.yaml` 钉在某个提交上。命令行安装建议直接带 tag（`dsh-remote-access-proxy`）。DSH 运行中请用配置页或插件页更新；DSH 没有运行时，也可以在 profile 目录里用新的 tag 再执行一次 `pnpm add`。
 
 ## 配置页
@@ -55,13 +45,13 @@ git 依赖由 profile 的 `pnpm-lock.yaml` 钉在某个提交上。命令行安�
 - **重新生成入口路径**：保存后旧地址立即失效，适合怀疑地址泄露的时候用。
 - 开关类设置显示为开关；保存后立即生效，代理原地重启，不用重启 DSH。
 
-在 DSH 0.2.0 上配置页只在本机页面出现；0.2.1 起远程页面也能打开它，但**一键更新只在本机页面提供**。
+远程页面能否修改宿主设置取决于 DSH 版本及其远程访问策略；插件更新在 DSH 插件页管理。
 
 ## 要不要开 TLS
 
 不是必须的。DSH 0.2 在明文 http 下也能正常工作。
 
-- **VPN / 家庭局域网**：用 http 就行，流量本身已经在私有网络里。
+- **VPN / 家庭局域网**：可以使用 HTTP，但它本身不加密流量；不可信网络应使用 HTTPS，VPN 可另行提供加密传输。
 - **公网**：请开 TLS，或者把代理放在 HTTPS 反代（Caddy、nginx、Cloudflare Tunnel）后面。
 
 开 TLS 需要一个 `.pfx` 证书。Windows 上用 PowerShell 生成自签证书：
@@ -125,11 +115,17 @@ openssl pkcs12 -export -inkey key.pem -in cert.pem -out dsh-proxy.pfx -passout p
 
 ## 更新
 
-更新由 DSH「插件」页统一管理：查看 npm 版本列表、选择兼容版本并更新。插件自身不再检查 GitHub 或执行安装。发布配置见 [PUBLISHING.md](PUBLISHING.md)。
+当前版本使用 npm 来源，由 DSH 管理安装。DSH 提供版本列表时在插件页更新；没有该界面时，关闭实例后运行：
+
+~~~sh
+dsh plugin --profile web add dsh-remote-access-proxy@latest
+~~~
+
+插件自身的 GitHub 轮询与独立更新按钮已移除，旧 updateCheck 设置不再生效。维护者发布说明见 [PUBLISHING.md](PUBLISHING.md)。
 
 ## 从旧版本升级
 
-从 GitHub 来源迁移的步骤见本页开头的 npm 安装说明。保留原 profile 与配置行 ID；代理的旧绝对路径配置会在启动时修正。
+从 GitHub 来源迁移到 npm 时，先备份 profile 的 cordis.patch.yml，移除旧包后以 dsh-remote-access-proxy 重新添加。保留原行 ID，安装后检查已保存的配置。
 
 ## 开发与测试
 
