@@ -1,6 +1,6 @@
 # dsh-remote-access-proxy
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+[English](README.md) · **简体中文**
 
 [![npm](https://img.shields.io/npm/v/dsh-remote-access-proxy)](https://www.npmjs.com/package/dsh-remote-access-proxy) [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE) [![DSH plugin](https://img.shields.io/badge/DSH%20plugin-%E2%89%A50.2.1--rc.2-blue)](https://github.com/topics/dsh-plugin)
 
@@ -127,7 +127,7 @@ dsh plugin --profile web add dsh-remote-access-proxy@latest
 
 从 GitHub 来源迁移到 npm 时，先备份 profile 的 cordis.patch.yml，移除旧包后以 dsh-remote-access-proxy 重新添加。保留原行 ID，安装后检查已保存的配置。
 
-## 开发与测试
+## 开发
 
 ```
 dsh-remote-access-proxy/
@@ -153,9 +153,16 @@ node test-remote-access-proxy.mjs   # 期望：78 passed, 0 failed
 
 ## 相关项目
 
-- [deepinfra-fusion-proxy](https://github.com/citydirector/deepinfra-fusion-proxy)：DeepInfra Standard / Flex 按会话切换与自动回退
-- [dsh-loop-rescue](https://github.com/citydirector/dsh-loop-rescue)：模型复读时从流内切断、剪掉循环并自动续跑
-- [dsh-session-manager](https://github.com/citydirector/dsh-session-manager)：离线会话管理器，可升级、归档、清洗循环、修复烂尾会话
+[@citydirector](https://github.com/citydirector) 的其它 DeepSeek Harness（DSH）项目：
+
+| 项目 | 类型 | 用途 |
+|---|---|---|
+| [DSH-build](https://github.com/citydirector/DSH-build) | 构建 | DSH 的 Windows 便携版 / 桌面版绿色构建，每天跟随上游打补丁、冒烟、发布 |
+| [deepinfra-fusion-proxy](https://github.com/citydirector/deepinfra-fusion-proxy) | 插件 | DeepInfra Standard / Flex 按会话切换与自动回退 |
+| [dsh-loop-rescue](https://github.com/citydirector/dsh-loop-rescue) | 插件 | 模型复读时从流内切断、剪掉循环并自动续跑 |
+| [dsh-pwsh-plugin](https://github.com/citydirector/dsh-pwsh-plugin) | 插件 | 常驻 pwsh 会话工具（`pwsh_run`），附带给 `bash` 补写边界的 WSL 垫片 |
+| [ui-locate-mcp](https://github.com/citydirector/ui-locate-mcp) | MCP 插件 | 按界面文字和图标给出精确像素坐标，用于桌面操作 |
+| [dsh-session-manager](https://github.com/citydirector/dsh-session-manager) | 离线工具 | 离线升级、归档、回收站、清洗循环、修复烂尾 / 隐藏会话 |
 
 ## 许可证
 
