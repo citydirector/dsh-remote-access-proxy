@@ -26,14 +26,12 @@
  *   long-running deployment cannot grow an unbounded log.
  * - Updates are managed by DSH through the npm registry.
  *
- * DSH browser-auth bridge (2026-09-04): DSH now authenticates every browser
- * session with a per-process launch token (`http://<upstream>/?token=…`)
- * plus an authority-bound signed cookie (`dsh-auth-*`); without it every /api
- * request is 401. This proxy therefore performs the token exchange itself and
- * forwards carrying the minted DSH cookie, so remote users keep the old gate
- * UX (random path + HttpOnly cookie) and never need to know the launch token.
- * The cookie is signed with a durable secret and lives 30 days, surviving DSH
- * restarts; an upstream 401 drops it and triggers a fresh exchange.
+ * DSH authentication bridge: provider-based hosts receive a separate random,
+ * process-local credential registered through connection.authentication. It
+ * never reaches the browser and is revoked when the plugin unloads. Older
+ * hosts still exchange their launch token for an authority-bound dsh-auth-*
+ * cookie, refreshing that cookie after an upstream 401. Both paths preserve
+ * the same remote gate and remembered-device sessions.
  *
  * DSH 0.1.7 configuration model (2026-09-24): `settings.yaml` is gone. A plugin
  * declares its configurable values in its own Cordis `Config`, marks the ones
@@ -59,7 +57,7 @@ export const name = "dsh-remote-access-proxy"
 const PACKAGE = "dsh-remote-access-proxy"
 
 /**
- * Required services. `connection` carries this process's launch token. The
+ * Required services. `connection` supplies the host authentication bridge. The
  * settings service is deliberately NOT required: the plugin's configuration is
  * its own Config, so the proxy still runs — and still serves remote clients —
  * in a deployment that mounts no settings forms at all. `webStartup` (upstream
@@ -762,6 +760,7 @@ export function apply(ctx, config) {
   let current = undefined
   let dshCookie = undefined
   let exchanging = undefined
+  let bridgeCookie = undefined
   /**
    * What the configuration page shows: whether the listener is up and, if not,
    * why. `state` is one of starting | listening | disabled | error.
@@ -986,7 +985,48 @@ export function apply(ctx, config) {
     return settings
   }
 
-  /** The launch token of this DSH process, read from the connection service. */
+  // DSH 0.2.2 exposes provider-based authentication; desktop hosts no longer
+  // expose authenticatedUrl(). Own a separate in-memory credential, rather than
+  // reaching into the desktop launcher's private session. Only upstream requests
+  // carry it: upstreamHeaders replaces browser cookies after our gate accepts.
+  // Inject optionally: older hosts have no authentication service, and newer
+  // Cordis rejects even feature detection through an undeclared service getter.
+  ctx.inject(["connection.authentication"], (child) => {
+    if (typeof child.connection.createPeer !== "function") return
+    child.effect(() => {
+      const expected = Buffer.from(randomBytes(32).toString("base64url"), "ascii")
+      const peer = child.connection.createPeer({ principal: { kind: "owner" } })
+      const cookieName = "dsh-remote-access-proxy-session"
+      let active = true
+      const unregister = child.connection.authentication.register({
+        authenticate(request) {
+          if (!active || peer.signal.aborted) return undefined
+          const headers = request.headers
+          const raw = typeof headers?.get === "function" ? headers.get("cookie") : headers?.cookie
+          if (typeof raw !== "string") return undefined
+          const matches = raw.split(";").map((part) => part.trim()).filter((part) => part.startsWith(cookieName + "="))
+          if (matches.length !== 1) return undefined
+          const value = matches[0].slice(cookieName.length + 1)
+          if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return undefined
+          return timingSafeEqual(Buffer.from(value, "ascii"), expected) ? peer : undefined
+        },
+      })
+      bridgeCookie = cookieName + "=" + expected.toString("ascii")
+      log("DSH provider authentication bridge registered")
+      return async () => {
+        active = false
+        bridgeCookie = undefined
+        expected.fill(0)
+        try {
+          if (typeof unregister === "function") await unregister()
+        } finally {
+          await peer.dispose()
+        }
+      }
+    }, "dsh-remote-access-proxy: authentication bridge")
+  })
+
+  /** The launch token on older hosts without provider-based authentication. */
   function launchToken(host, port) {
     try {
       const base = `http://${host}:${port}`
@@ -1035,6 +1075,7 @@ export function apply(ctx, config) {
 
   /** Return the held DSH cookie, exchanging on first need (concurrent-safe). */
   function getDshCookie() {
+    if (bridgeCookie !== undefined) return Promise.resolve(bridgeCookie)
     if (dshCookie !== undefined) return Promise.resolve(dshCookie)
     if (exchanging !== undefined) return exchanging
     if (current === undefined) return Promise.resolve(undefined)
@@ -1046,6 +1087,8 @@ export function apply(ctx, config) {
 
   /** Upstream 401 means our DSH cookie is stale; drop and refresh it. */
   function onUpstream401() {
+    // Provider credentials belong to this instance, not a refreshable host cookie.
+    if (bridgeCookie !== undefined) return
     if (dshCookie === undefined) return
     dshCookie = undefined
     log("DSH 401 observed; refreshing session cookie")

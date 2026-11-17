@@ -6,7 +6,7 @@
 
 在手机、平板或另一台电脑上用浏览器使用 DSH（DeepSeek Harness）。
 
-插件在 DSH 里起一个小型反向代理：远程设备只要打开一个带随机路径的地址，就能用完整的 Web GUI，不用知道 DSH 每次启动都会变的 launch token。前面接什么都行：局域网 IP、easytier、ZeroTier、Tailscale、nginx、Caddy、Cloudflare Tunnel。
+插件在 DSH 里起一个小型反向代理：远程设备只要打开一个带随机路径的地址，就能用完整的 Web GUI，不用手动管理 DSH 的宿主认证凭证。前面接什么都行：局域网 IP、easytier、ZeroTier、Tailscale、nginx、Caddy、Cloudflare Tunnel。
 
 需要 **DSH >=0.2.1-rc.2 <0.3.0** 与 **Node.js 24.9+**。
 
@@ -81,6 +81,7 @@ openssl pkcs12 -export -inkey key.pem -in cert.pem -out dsh-proxy.pfx -passout p
 
 - **远程设备完全连不上**（连接被重置）：它的地址不在白名单里。配置页会显示被拒绝的地址，把它加进去，或点「只允许局域网和 VPN」。
 - **远程打开显示 `forbidden`**：随机路径不对。重新打开完整的入口地址。
+- **升级 DSH 后只显示纯文本 `unauthorized`**：将本插件更新到 1.5.3 或更高版本。DSH 0.2.2 桌面端已改用 provider 认证，旧版插件只支持 launch token 交换。
 - **页面只有一行纯文本 `bad gateway`**：代理连不上上游 DSH。状态卡的「上游」一行显示它正在用的地址，`access.log` 里记着原因（通常是 `ECONNREFUSED`）。把 `upstreamHost` / `upstreamPort` 留空 / `0`，让地址自动跟随当前实例。1.4.1 之前的桌面端必然踩这个坑：桌面启动器传的是 `--port 0`，而插件读的是 `webStartup` 上那个**请求值** `0`，没读 `webServer` 实际绑定的端口，于是掉到 3080。
 - **两个 DSH 共用一个 `$DSH_HOME`**：它们读同一份 profile，会抢同一个端口。在其中一个的配置页关掉「启用」，或者给两边设不同的端口。
 
@@ -93,7 +94,7 @@ openssl pkcs12 -export -inkey key.pem -in cert.pem -out dsh-proxy.pfx -passout p
 - **访问密码**（可选）：不设时只靠随机路径；设置后入口显示登录表单，输错会延迟并按地址限流；
 - **记住设备**：进入（或登录）后写入 `dsh_et_gate`，这是一个 30 天后过期的签名值（`Path=/; Max-Age=2592000; HttpOnly; SameSite=Strict`，开 TLS 时再加 `Secure`）。签名覆盖随机路径和密码，所以改其中任意一个、或重新生成路径，所有设备都会失效。用户不需要手动管理它。
 
-代理以回环身份转发给 DSH（Host 改写为 `127.0.0.1:<端口>`，去掉 Origin），并**自己完成 launch token 交换、持有 `dsh-auth-*` Cookie**，所以远程用户永远看不到每次启动都会变的 token。DSH 返回 401 时，代理丢弃旧 Cookie 并重新交换。
+代理以回环身份转发给 DSH（Host 改写为 `127.0.0.1:<端口>`，去掉 Origin）。新版 DSH（包括桌面版 0.2.2-rc.3）通过 `connection.authentication` 注册代理专用的随机凭证：凭证只保存在插件内存中，只注入发往 DSH 的 HTTP 和 WebSocket 请求，卸载时撤销，不发送给浏览器，也不读取桌面端私有凭证。旧版宿主仍通过 launch token 交换 `dsh-auth-*` Cookie，并在上游返回 401 后重新交换。两种模式都保留相同的随机入口、密码与设备登录机制。
 
 随机路径就是钥匙：把入口地址当密码对待。`access.log` 的启动行也会记录它。
 

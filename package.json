@@ -1,8 +1,8 @@
 {
   "name": "dsh-remote-access-proxy",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "type": "module",
-  "description": "Reach the DSH Web GUI from your phone or another computer: a secret-path reverse proxy with an optional password and client allow list that bridges DSH's per-start launch token, configured from its own page in the Plugins panel.",
+  "description": "Reach the DSH Web GUI from your phone or another computer: a secret-path reverse proxy with an optional password and client allow list that bridges DSH's host authentication, configured from its own page in the Plugins panel.",
   "keywords": [
     "dsh",
     "dsh-plugin",
