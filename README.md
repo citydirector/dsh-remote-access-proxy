@@ -6,7 +6,7 @@
 
 Use DSH (DeepSeek Harness) from your phone, tablet, or another computer's browser.
 
-The plugin runs a small reverse proxy inside DSH. A remote device opens one address with a random path and gets the full Web GUI, without ever needing the launch token DSH changes on every start. Anything can sit in front: a LAN IP, easytier, ZeroTier, Tailscale, nginx, Caddy, Cloudflare Tunnel.
+The plugin runs a small reverse proxy inside DSH. A remote device opens one address with a random path and gets the full Web GUI, without needing to manage DSH's host credentials. Anything can sit in front: a LAN IP, easytier, ZeroTier, Tailscale, nginx, Caddy, Cloudflare Tunnel.
 
 Requires **DSH >=0.2.1-rc.2 <0.3.0** and **Node.js 24.9+**.
 
@@ -79,6 +79,7 @@ Then switch on "Enable TLS" in the page, fill in the path and passphrase, and sa
 
 - **The remote device can't connect at all** (connection reset): its address isn't in the allow list. The page shows the address it turned away; add it, or click **LAN and VPN only**.
 - **`forbidden` on the remote device**: the path is wrong. Open the full entry address again.
+- **A plain-text `unauthorized` after upgrading DSH**: update this plugin to 1.5.3 or later. DSH 0.2.2 desktop hosts use provider authentication; older plugin versions only know the launch-token exchange.
 - **A plain-text `bad gateway`**: the proxy could not reach the upstream DSH. The status card's **Upstream** line shows the address it is using, and `access.log` records the reason (usually `ECONNREFUSED`). Leave `upstreamHost` / `upstreamPort` at empty / `0` so the address follows the running instance. Before 1.4.1 the desktop app was unusable this way: it starts its host with `--port 0`, the plugin read the *requested* `0` from `webStartup` instead of the port the OS bound on `webServer`, and fell back to 3080.
 - **Two DSH apps sharing one `$DSH_HOME`** read the same profile and fight over one port. Switch "Enabled" off in one of them, or give each its own port.
 
@@ -91,7 +92,7 @@ Access control is entirely the proxy's gate:
 - **Password** (optional): without it the path alone opens the site; with it the entry shows a sign-in form, failed tries are slowed and rate-limited per address;
 - **Remembered device**: entering (or signing in) sets `dsh_et_gate`, a signed value that expires after 30 days (`Path=/; Max-Age=2592000; HttpOnly; SameSite=Strict`, plus `Secure` with TLS). It is signed with a server secret over the path and the password, so changing either — or regenerating the path — revokes every device. Nobody ever edits it by hand.
 
-The proxy forwards to DSH as loopback (Host rewritten to `127.0.0.1:<port>`, Origin stripped) and **performs the launch-token exchange itself, holding the `dsh-auth-*` cookie**, so remote users never see the per-start token. On an upstream 401 it drops that cookie and exchanges again.
+The proxy forwards to DSH as loopback (Host rewritten to `127.0.0.1:<port>`, Origin stripped). On provider-based hosts, including desktop DSH 0.2.2-rc.3, it registers its own random credential through `connection.authentication`. The credential lives only in plugin memory, is injected into upstream HTTP and WebSocket requests, and is revoked on unload. It never reaches the browser or reads the desktop launcher's private credential. Older hosts retain the launch-token exchange and held `dsh-auth-*` cookie, refreshing it after an upstream 401. Both modes preserve the same random entry, password and remembered-device gate.
 
 The path is the key: treat the entry address like a password. The `access.log` startup line records it too.
 

@@ -217,7 +217,13 @@ function createCtx(initial, connection, { webStartup, webServer, documentPath } 
     },
   }
   const ctx = {
-    connection,
+    // Cordis rejects access before the owning scope declares the service.
+    connection: new Proxy(connection, {
+      get(target, property, receiver) {
+        if (property === "authentication") throw new Error('cannot get property "connection.authentication" without inject')
+        return Reflect.get(target, property, receiver)
+      },
+    }),
     fiber: { entry: { options: { id: ROW_ID, name: BUNDLE, config: undefined } } },
     root: { loader: { await: () => Promise.resolve() } },
     get(name, strict = true) {
@@ -233,6 +239,7 @@ function createCtx(initial, connection, { webStartup, webServer, documentPath } 
     inject(deps, callback) {
       injected.push([...deps])
       if (deps.includes("settings")) callback({ settings: settingsStub, effect: (fn) => { fn() } })
+      if (deps.includes("connection.authentication") && connection.authentication !== undefined) callback({ ...ctx, connection })
     },
     on(event, fn) {
       const list = handlers.get(event) ?? []
@@ -974,6 +981,88 @@ async function main() {
   upCtx._disposeAll()
   keepAlive.destroy()
   upMock.server.close()
+
+  // New desktop hosts have no authenticatedUrl: every HTTP and WS request
+  // passes through the provider registry, including the HTML entry document.
+  const providers = new Set()
+  const peers = []
+  const providerConnection = {
+    ...connection,
+    authenticatedUrl: undefined,
+    createPeer({ principal }) {
+      const lifetime = new AbortController()
+      const peer = { principal, signal: lifetime.signal, dispose() { lifetime.abort() } }
+      peers.push(peer)
+      return peer
+    },
+    authentication: {
+      register(provider) {
+        providers.add(provider)
+        return () => providers.delete(provider)
+      },
+    },
+  }
+  const admitted = (headers) => [...providers].some((provider) => provider.authenticate({ headers }))
+  let internalCookie
+  const providerHost = http.createServer((req, res) => {
+    if (!admitted(req.headers)) { res.writeHead(401); res.end("unauthorized"); return }
+    internalCookie = req.headers.cookie
+    if (req.url === "/reject") { res.writeHead(401); res.end("unauthorized"); return }
+    res.writeHead(200, { "content-type": "text/html" })
+    res.end("<html>provider index ok</html>")
+  })
+  providerHost.on("upgrade", (req, socket) => {
+    if (!admitted(req.headers)) { socket.end("HTTP/1.1 401 Unauthorized\r\n\r\n"); return }
+    socket.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+    socket.pipe(socket)
+  })
+  await new Promise((resolve) => providerHost.listen(0, "127.0.0.1", resolve))
+  const providerPort = await freePort()
+  const providerState = { ...ctx2._state, enabled: true, listenPort: providerPort, secretPath: "provider-entry", cookieValue: "provider-gate-secret", password: "", allowFrom: "", upstreamHost: "127.0.0.1", upstreamPort: providerHost.address().port }
+  let providerCtx = createCtx(providerState, providerConnection)
+  plugin.apply(providerCtx, providerCtx._refs)
+  await sleep(150)
+  const provider = [...providers][0]
+  check("provider registers inside an optional authentication injection scope", providerCtx._injected.some((deps) => deps.includes("connection.authentication")) && providers.size === 1)
+  let pr = await httpReq(providerHost.address().port)
+  check("provider host still rejects unauthenticated direct requests", pr.status === 401)
+  pr = await httpReq(providerPort, { path: "/provider-entry/" })
+  check("provider-only host serves the gated HTML entry without a launch token", pr.status === 200 && pr.body.includes("provider index ok"))
+  const browserCookies = pr.headers["set-cookie"] ?? []
+  check("internal provider credential is never issued to the browser", browserCookies.length === 1 && browserCookies[0].startsWith("dsh_et_gate=") && !browserCookies.join(";").includes(internalCookie))
+  const savedCookie = internalCookie
+  const providerGate = browserCookies[0]?.split(";")[0]
+  check("provider accepts both Node headers and Fetch Headers", admitted({ cookie: savedCookie }) && admitted(new Headers({ cookie: savedCookie })))
+  check("provider rejects missing, malformed, incorrect and duplicate credentials", [undefined, {}, { cookie: 12 }, { cookie: "dsh-remote-access-proxy-session=" + "x".repeat(43) }, { cookie: "dsh-remote-access-proxy-session=" + "é".repeat(43) }, { cookie: savedCookie + "; " + savedCookie }].every((headers) => !admitted(headers)))
+  pr = await httpReq(providerPort, { path: "/api/session/me", headers: { cookie: providerGate + "; dsh-remote-access-proxy-session=forged" } })
+  check("provider bridge replaces browser credentials after the gate allows API access", pr.status === 200 && internalCookie === savedCookie)
+  pr = await httpReq(providerPort, { path: "/api/session/me" })
+  check("provider bridge keeps the remote API gate mandatory", pr.status === 403)
+  pr = await httpReq(providerPort, { path: "/reject", headers: { cookie: providerGate } })
+  check("an application 401 does not rotate the provider credential", pr.status === 401 && admitted({ cookie: savedCookie }))
+  const providerWs = await new Promise((resolve, reject) => {
+    const req = http.request({ hostname: "127.0.0.1", port: providerPort, path: "/provider-entry/ws", headers: { connection: "Upgrade", upgrade: "websocket" } })
+    req.setTimeout(2000, () => req.destroy(new Error("provider websocket timed out")))
+    req.on("upgrade", (_res, socket) => resolve(socket))
+    req.on("response", (res) => { res.resume(); resolve(undefined) })
+    req.on("error", reject)
+    req.end()
+  })
+  check("provider-only host admits bridged WebSocket upgrades", providerWs !== undefined)
+  const providerWsClosed = closed(providerWs)
+  providerCtx._disposeAll()
+  await sleep(0)
+  check("unload revokes the credential, withdraws its provider and disposes its Peer", providers.size === 0 && peers[0].signal.aborted && !provider.authenticate({ headers: { cookie: savedCookie } }))
+  check("provider unload closes existing WebSockets", await providerWsClosed)
+  providerCtx = createCtx(providerState, providerConnection)
+  plugin.apply(providerCtx, providerCtx._refs)
+  await sleep(150)
+  pr = await httpReq(providerPort, { path: "/provider-entry/" })
+  check("provider hot replacement serves the same entry with a fresh private credential", pr.status === 200 && internalCookie !== savedCookie && !admitted({ cookie: savedCookie }) && providers.size === 1)
+  check("private bridge credential is absent from access logs", !readFileSync(REAL_LOG, "utf8").includes(internalCookie) && !readFileSync(REAL_LOG, "utf8").includes(savedCookie))
+  providerCtx._disposeAll()
+  providerHost.closeAllConnections()
+  await new Promise((resolve) => providerHost.close(resolve))
 
   check(
     "every Config field is editable in the browser half",
