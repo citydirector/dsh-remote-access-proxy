@@ -919,6 +919,14 @@ async function main() {
       && clientSource.includes("whileServed"),
   )
   check(
+    "the browser half also registers the page as a Settings section",
+    clientSource.includes('"settings.section"')
+      && clientSource.includes("id: NS")
+      && clientSource.includes("label: () => copy().nav")
+      && clientSource.includes('nav: "远程访问代理"')
+      && clientSource.includes('nav: "Remote access"'),
+  )
+  check(
     "the browser half renders booleans as switches and reads the status route",
     clientSource.includes('entry.kind === "boolean"')
       && !clientSource.includes("entry.spec.kind")

@@ -17,7 +17,7 @@ Requires **DSH >=0.2.1-rc.2 <0.3.0** and **Node.js 24.9+**.
    dsh-remote-access-proxy
    ```
    Switch it on.
-2. **Get the address**: open **Remote Access Proxy** in the plugin list, then the **Remote Access Proxy** component under it. The top of the page shows whether it is running and the **entry addresses**. Click **Copy**.
+2. **Get the address**: open **Settings** and pick **Remote access** on the left (the configuration section on the plugin’s row is the same page). The top of the page shows whether it is running and the **entry addresses**. Click **Copy**.
 3. **Open it remotely**: on a device on the same network, open the address in a browser, e.g. `http://192.168.1.20:13337/k3x9q2m7p1zt/`. Bookmark it or add it to the home screen.
 
 Nothing needs configuring: port 13337 on every interface, with the random path generated and saved on first start. Add a password or limit who may connect whenever you like.
@@ -92,7 +92,7 @@ Access control is entirely the proxy's gate:
 - **Password** (optional): without it the path alone opens the site; with it the entry shows a sign-in form, failed tries are slowed and rate-limited per address;
 - **Remembered device**: entering (or signing in) sets `dsh_et_gate`, a signed value that expires after 30 days (`Path=/; Max-Age=2592000; HttpOnly; SameSite=Strict`, plus `Secure` with TLS). It is signed with a server secret over the path and the password, so changing either — or regenerating the path — revokes every device. Nobody ever edits it by hand.
 
-The proxy forwards to DSH as loopback (Host rewritten to `127.0.0.1:<port>`, Origin stripped). On provider-based hosts, including desktop DSH 0.2.2-rc.3, it registers its own random credential through `connection.authentication`. The credential lives only in plugin memory, is injected into upstream HTTP and WebSocket requests, and is revoked on unload. It never reaches the browser or reads the desktop launcher's private credential. Older hosts retain the launch-token exchange and held `dsh-auth-*` cookie, refreshing it after an upstream 401. Both modes preserve the same random entry, password and remembered-device gate.
+The proxy forwards to DSH as loopback (Host rewritten to `127.0.0.1:<port>`, Origin stripped). On provider-based hosts, including desktop DSH 0.2.2 and later, it registers its own random credential through `connection.authentication`. The credential lives only in plugin memory, is injected into upstream HTTP and WebSocket requests, and is revoked on unload. It never reaches the browser or reads the desktop launcher's private credential. Older hosts retain the launch-token exchange and held `dsh-auth-*` cookie, refreshing it after an upstream 401. Both modes preserve the same random entry, password and remembered-device gate.
 
 The path is the key: treat the entry address like a password. The `access.log` startup line records it too.
 

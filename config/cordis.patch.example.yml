@@ -4,10 +4,10 @@
 # active profile's own `cordis.patch.yml`, addressed by the profile entry id —
 # here `remote-access-proxy`, the row this bundle declares.
 #
-# You normally do NOT need this file: open the Plugins page (sidebar →
-# Plugins), open the `dsh-remote-access-proxy` bundle, open the
-# `remote-access-proxy` row and use its 配置 page. That writes the same rows
-# into `data/profiles/<profile>/cordis.patch.yml` for you.
+# You normally do NOT need this file: open Settings → 远程访问代理, or the
+# `remote-access-proxy` row under the `dsh-remote-access-proxy` bundle in the
+# Plugins page, and use its 配置 page. That writes the same rows into
+# `data/profiles/<profile>/cordis.patch.yml` for you.
 #
 # Merge only the keys you want to pin — a key left out keeps the bundle layer's
 # value and then the schema default. Rows are addressed by id, so this user
