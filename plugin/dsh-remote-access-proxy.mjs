@@ -17,8 +17,9 @@
  *   needed; explicit values override.
  * - Optional TLS (self-signed pfx): browsers require a secure context for
  *   crypto.randomUUID, so plain-HTTP remote access breaks the web client.
- * - Configured from the Plugins page: the bundle's row page (sidebar → Plugins
- *   → dsh-remote-access-proxy → the `remote-access-proxy` row → configure).
+ * - Configured from the Plugins page's row page (sidebar → Plugins →
+ *   dsh-remote-access-proxy → the `remote-access-proxy` row → configure) and
+ *   from the same page under DSH's Settings dialog.
  *   A volatile-only edit never remounts this plugin; it restarts the embedded
  *   server in place.
  * - Diagnostics go to a size-bounded `access.log` beside this file: it rotates

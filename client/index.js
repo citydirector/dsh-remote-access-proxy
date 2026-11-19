@@ -9,10 +9,12 @@
  * they control, and booleans render as switches.
  *
  * A bundle row's own page is contributed through the Plugins page's
- * `plugins.row.config` slot, keyed `<bundle package>#<row id>`. The staged form
+ * `plugins.row.config` slot, keyed `<bundle package>#<row id>`, and registered a
+ * second time under `settings.section` so the same page is also a section of
+ * DSH's Settings dialog. The staged form
  * is the one the shipped settings pages use: `SettingsFormModel` over a
- * `configForms` scope plus the `ui-primitives` settings form and fields. The
- * registration follows `ctx.configForms.whileServed`, so a deployment that never
+ * `configForms` scope plus the `ui-primitives` settings form and fields. Both
+ * registrations follow `ctx.configForms.whileServed`, so a deployment that never
  * composed the host plugin — or a remote page, which DSH does not let edit
  * Host settings — shows no page. Every value is a `.volatile()` field of the
  * host plugin's Config: a save lands in the active profile's `cordis.patch.yml`
@@ -53,6 +55,7 @@ window.__ModuleLoader__.load({
     const COPY = {
       zh: {
         summary: "在手机或其它电脑上用浏览器访问 DSH：随机路径入口，可选访问密码和来源地址白名单",
+        nav: "远程访问代理",
         statusTitle: "状态",
         listening: "运行中",
         starting: "启动中…",
@@ -118,6 +121,7 @@ window.__ModuleLoader__.load({
       },
       en: {
         summary: "Use DSH from your phone or another computer: a secret-path entry with an optional password and client allow list",
+        nav: "Remote access",
         statusTitle: "Status",
         listening: "Running",
         starting: "Starting…",
@@ -522,14 +526,34 @@ window.__ModuleLoader__.load({
       ctx.effect(() => () => card.dispose(), "dsh-remote-access-proxy: form subscription");
       ctx.effect(
         () =>
-          ctx.configForms.whileServed([NS], () =>
-            ctx.slots.inject("plugins.row.config", () =>
+          ctx.configForms.whileServed([NS], () => {
+            // The page the Plugins panel opens for this row.
+            const rowPage = ctx.slots.inject("plugins.row.config", () =>
               ctx.slots.register(
                 { name: "plugins.row.config", key: ROW_KEY, inject: () => card.inject() },
                 RemoteAccessProxyCard,
               ),
-            ),
-          ),
+            );
+            // The same page as a section of DSH's Settings dialog, so the proxy is
+            // reachable without going through plugin management.
+            const settingsSection = ctx.slots.inject("settings.section", () =>
+              ctx.slots.register(
+                {
+                  name: "settings.section",
+                  id: NS,
+                  order: 61,
+                  label: () => copy().nav,
+                  inject: () => card.inject(),
+                },
+                RemoteAccessProxyCard,
+              ),
+            );
+            return () => {
+              // Both are disposers from `slots.inject`; guard the type so a slot this
+              // deployment never provided cannot break teardown.
+              for (const dispose of [settingsSection, rowPage]) if (typeof dispose === "function") dispose();
+            };
+          }),
         "dsh-remote-access-proxy: configuration page",
       );
     }
