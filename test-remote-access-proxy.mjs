@@ -288,6 +288,23 @@ function createCtx(initial, connection, { webStartup, webServer, documentPath } 
   return ctx
 }
 
+/**
+ * Wrap a mock context the way Cordis 4.0.0-rc.12 (DSH 0.2.3) presents it to a
+ * plugin: the root context sits under `Symbol.for("cordis.root")`, and reading
+ * the string key `root` throws because a plugin cannot inject it. Optional
+ * chaining does not help against a throwing getter.
+ */
+function withSymbolRoot(ctx, root) {
+  delete ctx.root
+  return new Proxy(ctx, {
+    get(target, property, receiver) {
+      if (property === "root") throw new Error('cannot get property "root" without inject')
+      if (property === Symbol.for("cordis.root")) return root
+      return Reflect.get(target, property, receiver)
+    },
+  })
+}
+
 function httpReq(port, { method = "GET", path = "/", headers = {}, body, hostname = "127.0.0.1" } = {}) {
   return new Promise((resolve, reject) => {
     const req = http.request({ hostname, port, method, path, headers }, (res) => {
@@ -1071,6 +1088,34 @@ async function main() {
   providerCtx._disposeAll()
   providerHost.closeAllConnections()
   await new Promise((resolve) => providerHost.close(resolve))
+
+  // The first run mints the gate secrets and persists them once the Loader has
+  // settled; the Loader hangs off the root context. Cordis 4.0.0-rc.12 keys that
+  // context by symbol and throws on `ctx.root`; older hosts only have `ctx.root`.
+  const rootHosts = [
+    ["symbol-keyed root (Cordis 4.0.0-rc.12)", (ctx, root) => withSymbolRoot(ctx, root)],
+    ["string-keyed root (older hosts)", (ctx, root) => Object.assign(ctx, { root })],
+  ]
+  for (const [label, host] of rootHosts) {
+    const rootCtx = createCtx({ ...ctx2._state, enabled: false, secretPath: "", cookieValue: "" }, connection)
+    let awaited = 0
+    const view = host(rootCtx, { loader: { await: () => { awaited += 1; return Promise.resolve() } } })
+    let thrown
+    try {
+      plugin.apply(view, rootCtx._refs)
+    } catch (error) {
+      thrown = error
+    }
+    await sleep(20)
+    const written = rootCtx._writes[0] ?? {}
+    check(`${label}: first-run secret generation does not throw`, thrown === undefined, thrown?.message ?? "")
+    check(
+      `${label}: persists the generated secrets after loader.await()`,
+      awaited === 1 && typeof written.secretPath === "string" && written.secretPath.length === 12,
+      JSON.stringify({ awaited, written }),
+    )
+    rootCtx._disposeAll()
+  }
 
   check(
     "every Config field is editable in the browser half",

@@ -893,9 +893,27 @@ export function apply(ctx, config) {
     const outside = hmr?.executing !== undefined && typeof hmr.executing.exit === "function"
       ? (work) => hmr.executing.exit(work)
       : (work) => work()
-    const loader = ctx.root?.loader
+    const loader = rootContext()?.loader
     const settled = loader !== undefined && typeof loader.await === "function" ? loader.await() : Promise.resolve()
     settled.then(() => outside(write), () => outside(write))
+  }
+
+  /**
+   * The application's root context, which owns the Loader.
+   *
+   * Cordis 4.0.0-rc.12 (DSH 0.2.3) keys it by `Symbol.for("cordis.root")`; its
+   * context proxy throws on the old `ctx.root` key inside a plugin, which
+   * optional chaining cannot catch. Symbol keys skip that inject check, so the
+   * symbol goes first; older hosts without it still answer `ctx.root`.
+   */
+  function rootContext() {
+    const root = ctx[Symbol.for("cordis.root")]
+    if (root !== undefined && root !== null) return root
+    try {
+      return ctx.root
+    } catch {
+      return undefined
+    }
   }
 
   /** A port that can actually be connected to; `0` is the OS's "pick a free one". */
